@@ -107,27 +107,27 @@ set_determinism(42)
 train = np.load('/home/simone.sarrocco/thesis/project/data/train_set_patient_split.npz')['images']
 val = np.load('/home/simone.sarrocco/thesis/project/data/val_set_patient_split.npz')['images']
 test = np.load('/home/simone.sarrocco/thesis/project/data/test_set_patient_split.npz')['images']
-train_art10_images = []
-val_art10_images = []
-test_art10_images = []
+train_pseudoart100_images = []
+val_pseudoart100_images = []
+test_pseudoart100_images = []
 for i in range(len(train)):
-    image = torch.tensor(train[i, :1, ...])
-    train_art10_images.append(image)
-train_art10_images = torch.stack(train_art10_images, 0)
+    image = torch.tensor(train[i, -1:, ...])
+    train_pseudoart100_images.append(image)
+train_pseudoart100_images = torch.stack(train_pseudoart100_images, 0)
 
 for i in range(len(val)):
-    image = torch.tensor(val[i, :1, ...])
-    val_art10_images.append(image)
-val_art10_images = torch.stack(val_art10_images, 0)
+    image = torch.tensor(val[i, -1:, ...])
+    val_pseudoart100_images.append(image)
+val_pseudoart100_images = torch.stack(val_pseudoart100_images, 0)
 
 for i in range(len(test)):
-    image = torch.tensor(test[i, :1, ...])
-    test_art10_images.append(image)
-test_art10_images = torch.stack(test_art10_images, 0)
+    image = torch.tensor(test[i, -1:, ...])
+    test_pseudoart100_images.append(image)
+test_pseudoart100_images = torch.stack(test_pseudoart100_images, 0)
 
-train_data = OCTDataset(train_art10_images)
+train_data = OCTDataset(train_pseudoart100_images)
 train_loader = DataLoader(train_data, batch_size=1, shuffle=False, num_workers=0)
-print(f'Shape of training set: {train_art10_images.shape}')
+print(f'Shape of training set: {train_pseudoart100_images.shape}')
 # train_datalist = [{"image": train[i, -1:, ...]} for i in range(len(train))]
 
 # %% [markdown]
@@ -139,10 +139,10 @@ print(f'Shape of training set: {train_art10_images.shape}')
 # 1. `RandAffined` efficiently performs rotate, scale, shear, translate, etc. together based on PyTorch affine transform.
 
 # %%
-val_data = OCTDataset(val_art10_images)
+val_data = OCTDataset(val_pseudoart100_images)
 # val_datalist = [{"image": val[i, -1:, ...]} for i in range(len(val))]
 val_loader = DataLoader(val_data, batch_size=1, shuffle=False, num_workers=0)
-print(f'Shape of validation set: {val_art10_images.shape}')
+print(f'Shape of validation set: {val_pseudoart100_images.shape}')
 
 # %% [markdown]
 # ### Visualization of the training images
@@ -188,10 +188,10 @@ adv_loss = PatchAdversarialLoss(criterion="least_squares")
 adv_weight = 0.01
 perceptual_weight = 0.001
 
-tensorboard_dir = '/home/simone.sarrocco/thesis/project/models/diffusion_model/GenerativeModels/tutorials/generative/2d_vqgan/only_art10/tensorboard_log'
+tensorboard_dir = '/home/simone.sarrocco/thesis/project/models/diffusion_model/GenerativeModels/tutorials/generative/2d_vqgan/only_pseudoart100/tensorboard_log'
 writer = SummaryWriter(log_dir=tensorboard_dir)
 # Define the directory to save checkpoints
-checkpoint_dir = "/home/simone.sarrocco/thesis/project/models/diffusion_model/GenerativeModels/tutorials/generative/2d_vqgan/only_art10/checkpoints"
+checkpoint_dir = "/home/simone.sarrocco/thesis/project/models/diffusion_model/GenerativeModels/tutorials/generative/2d_vqgan/only_pseudoart100/checkpoints"
 os.makedirs(checkpoint_dir, exist_ok=True)
 
 # %% [markdown]
