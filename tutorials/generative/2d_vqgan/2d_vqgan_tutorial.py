@@ -46,7 +46,7 @@ import os
 import shutil
 import tempfile
 import time
-
+# import sys
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
@@ -57,9 +57,11 @@ from monai.data import CacheDataset, DataLoader
 from monai.utils import first, set_determinism
 from torch.nn import L1Loss
 from tqdm import tqdm
-
 from generative.losses import PatchAdversarialLoss, PerceptualLoss
 from generative.networks.nets import VQVAE, PatchDiscriminator
+from dataset import OCTDataset
+from torch.utils.tensorboard import SummaryWriter
+# sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 print_config()
 
@@ -90,8 +92,17 @@ set_determinism(42)
 # one of the available classes ("HeadCT").
 
 # %%
-train_data = MedNISTDataset(root_dir=root_dir, section="training", download=True, progress=False, seed=0)
-train_datalist = [{"image": item["image"]} for item in train_data.data if item["class_name"] == "HeadCT"]
+# train_data = MedNISTDataset(root_dir=root_dir, section="training", download=True, progress=False, seed=0)
+# train_datalist = [{"image": item["image"]} for item in train_data.data if item["class_name"] == "HeadCT"]
+
+train = np.load('/home/simone.sarrocco/thesis/project/data/train_set_patient_split.npz')['images']
+val = np.load('/home/simone.sarrocco/thesis/project/data/val_set_patient_split.npz')['images']
+test = np.load('/home/simone.sarrocco/thesis/project/data/test_set_patient_split.npz')['images']
+
+train_data = OCTDataset(train)
+train_loader = DataLoader(train_data, batch_size=1, shuffle=False, num_workers=4, persistent_workers=True)
+
+# train_datalist = [{"image": train[i, -1:, ...]} for i in range(len(train))]
 
 # %% [markdown]
 # Here we use transforms to augment the training dataset:
@@ -102,52 +113,15 @@ train_datalist = [{"image": item["image"]} for item in train_data.data if item["
 # 1. `RandAffined` efficiently performs rotate, scale, shear, translate, etc. together based on PyTorch affine transform.
 
 # %%
-train_transforms = transforms.Compose(
-    [
-        transforms.LoadImaged(keys=["image"]),
-        transforms.EnsureChannelFirstd(keys=["image"]),
-        transforms.ScaleIntensityRanged(keys=["image"], a_min=0.0, a_max=255.0, b_min=0.0, b_max=1.0, clip=True),
-        transforms.RandAffined(
-            keys=["image"],
-            rotate_range=[(-np.pi / 36, np.pi / 36), (-np.pi / 36, np.pi / 36)],
-            translate_range=[(-1, 1), (-1, 1)],
-            scale_range=[(-0.05, 0.05), (-0.05, 0.05)],
-            spatial_size=[64, 64],
-            padding_mode="zeros",
-            prob=0.5,
-        ),
-    ]
-)
-train_ds = CacheDataset(data=train_datalist, transform=train_transforms)
-train_loader = DataLoader(train_ds, batch_size=256, shuffle=True, num_workers=4, persistent_workers=True)
+val_data = OCTDataset(val)
+# val_datalist = [{"image": val[i, -1:, ...]} for i in range(len(val))]
+val_loader = DataLoader(val_data, batch_size=1, shuffle=False, num_workers=4, persistent_workers=True)
 
-# %%
-val_data = MedNISTDataset(root_dir=root_dir, section="validation", download=True, progress=False, seed=0)
-val_datalist = [{"image": item["image"]} for item in val_data.data if item["class_name"] == "HeadCT"]
-val_transforms = transforms.Compose(
-    [
-        transforms.LoadImaged(keys=["image"]),
-        transforms.EnsureChannelFirstd(keys=["image"]),
-        transforms.ScaleIntensityRanged(keys=["image"], a_min=0.0, a_max=255.0, b_min=0.0, b_max=1.0, clip=True),
-    ]
-)
-val_ds = CacheDataset(data=val_datalist, transform=val_transforms)
-val_loader = DataLoader(val_ds, batch_size=256, shuffle=False, num_workers=4, persistent_workers=True)
 
 # %% [markdown]
 # ### Visualization of the training images
 
 # %%
-check_data = first(train_loader)
-print(f"batch shape: {check_data['image'].shape}")
-image_visualization = torch.cat(
-    [check_data["image"][0, 0], check_data["image"][1, 0], check_data["image"][2, 0], check_data["image"][3, 0]], dim=1
-)
-plt.figure("training images", (12, 6))
-plt.imshow(image_visualization, vmin=0, vmax=1, cmap="gray")
-plt.axis("off")
-plt.tight_layout()
-plt.show()
 
 # %% [markdown]
 # ### Define network, scheduler and optimizer
@@ -188,22 +162,26 @@ adv_loss = PatchAdversarialLoss(criterion="least_squares")
 adv_weight = 0.01
 perceptual_weight = 0.001
 
+tensorboard_dir = '/home/simone.sarrocco/thesis/project/models/diffusion_model/GenerativeModels/tutorials/generative/2d_vqgan/log'
+writer = SummaryWriter(log_dir=tensorboard_dir)
+
 
 # %% [markdown]
 # ### Model training
 # Here, we are training our model for 100 epochs (training time: ~50 minutes).
 
 # %%
-n_epochs = 100
+n_epochs = 1000
 val_interval = 10
 epoch_recon_loss_list = []
 epoch_gen_loss_list = []
 epoch_disc_loss_list = []
 val_recon_epoch_loss_list = []
 intermediary_images = []
-n_example_images = 4
+n_example_images = 1
 
 total_start = time.time()
+i = 0
 for epoch in range(n_epochs):
     model.train()
     discriminator.train()
@@ -213,17 +191,25 @@ for epoch in range(n_epochs):
     progress_bar = tqdm(enumerate(train_loader), total=len(train_loader), ncols=110)
     progress_bar.set_description(f"Epoch {epoch}")
     for step, batch in progress_bar:
-        images = batch["image"].to(device)
+        images = batch.to(device)
         optimizer_g.zero_grad(set_to_none=True)
 
         # Generator part
         reconstruction, quantization_loss = model(images=images)
+        i += 1
         logits_fake = discriminator(reconstruction.contiguous().float())[-1]
 
         recons_loss = l1_loss(reconstruction.float(), images.float())
         p_loss = perceptual_loss(reconstruction.float(), images.float())
         generator_loss = adv_loss(logits_fake, target_is_real=True, for_discriminator=False)
         loss_g = recons_loss + quantization_loss + perceptual_weight * p_loss + adv_weight * generator_loss
+        writer.add_scalar('Loss/perceptual_loss', p_loss, i)
+        writer.add_scalar('Loss/generator_loss', generator_loss, i)
+        writer.add_scalar('Loss/recons_loss', recons_loss, i)
+        writer.add_scalar('Loss/total_loss_g', loss_g, i)
+
+        writer.add_image(f'Training/Input', images[:n_example_images, 0], i)
+        writer.add_image(f'Training/Output', reconstruction[:n_example_images, 0], i)
 
         loss_g.backward()
         optimizer_g.step()
@@ -238,6 +224,8 @@ for epoch in range(n_epochs):
         discriminator_loss = (loss_d_fake + loss_d_real) * 0.5
 
         loss_d = adv_weight * discriminator_loss
+
+        writer.add_scalar('Loss/discriminator_loss', loss_d, i)
 
         loss_d.backward()
         optimizer_d.step()
@@ -262,14 +250,16 @@ for epoch in range(n_epochs):
         val_loss = 0
         with torch.no_grad():
             for val_step, batch in enumerate(val_loader, start=1):
-                images = batch["image"].to(device)
+                images = batch.to(device)
 
                 reconstruction, quantization_loss = model(images=images)
 
-                # get the first sammple from the first validation batch for visualization
+                # get the first sample from the first validation batch for visualization
                 # purposes
                 if val_step == 1:
                     intermediary_images.append(reconstruction[:n_example_images, 0])
+                    writer.add_image(f'Validation/Input', images[:n_example_images, 0], i)
+                    writer.add_image(f'Validation/Output', reconstruction[:n_example_images, 0], i)
 
                 recons_loss = l1_loss(reconstruction.float(), images.float())
 
@@ -277,12 +267,14 @@ for epoch in range(n_epochs):
 
         val_loss /= val_step
         val_recon_epoch_loss_list.append(val_loss)
+        writer.add_scalar('Loss/val_loss', val_loss, epoch+1)
 
 total_time = time.time() - total_start
 print(f"train completed, total time: {total_time}.")
 # %% [markdown]
 # ### Learning curves
 
+"""
 # %%
 plt.style.use("seaborn-v0_8")
 plt.title("Learning Curves", fontsize=20)
@@ -336,7 +328,7 @@ ax[1].imshow(reconstruction[0, 0].detach().cpu(), vmin=0, vmax=1, cmap="gray")
 ax[1].axis("off")
 ax[1].title.set_text("Reconstruction")
 plt.show()
-
+"""
 
 # %% [markdown]
 # ### Cleanup data directory
