@@ -43,10 +43,12 @@
 
 # %%
 import os
+import sys
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+
 import shutil
 import tempfile
 import time
-# import sys
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
@@ -61,9 +63,16 @@ from generative.losses import PatchAdversarialLoss, PerceptualLoss
 from generative.networks.nets import VQVAE, PatchDiscriminator
 from dataset import OCTDataset
 from torch.utils.tensorboard import SummaryWriter
-# sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
-
+from torchmetrics.image.lpip import LearnedPerceptualImagePatchSimilarity
+from torchmetrics.image import PeakSignalNoiseRatio, StructuralSimilarityIndexMeasure
 print_config()
+
+
+def mean_flat(tensor):
+    """
+    Take the mean over all non-batch dimensions.
+    """
+    return tensor.mean(dim=list(range(1, len(tensor.shape))))
 
 # %% [markdown]
 # ## Setup data directory
@@ -98,10 +107,27 @@ set_determinism(42)
 train = np.load('/home/simone.sarrocco/thesis/project/data/train_set_patient_split.npz')['images']
 val = np.load('/home/simone.sarrocco/thesis/project/data/val_set_patient_split.npz')['images']
 test = np.load('/home/simone.sarrocco/thesis/project/data/test_set_patient_split.npz')['images']
+train_art10_images = []
+val_art10_images = []
+test_art10_images = []
+for i in range(len(train)):
+    image = torch.tensor(train[i, :1, ...])
+    train_art10_images.append(image)
+train_art10_images = torch.stack(train_art10_images, 0)
 
-train_data = OCTDataset(train)
-train_loader = DataLoader(train_data, batch_size=1, shuffle=False, num_workers=4, persistent_workers=True)
+for i in range(len(val)):
+    image = torch.tensor(val[i, :1, ...])
+    val_art10_images.append(image)
+val_art10_images = torch.stack(val_art10_images, 0)
 
+for i in range(len(test)):
+    image = torch.tensor(test[i, :1, ...])
+    test_art10_images.append(image)
+test_art10_images = torch.stack(test_art10_images, 0)
+
+train_data = OCTDataset(train_art10_images)
+train_loader = DataLoader(train_data, batch_size=1, shuffle=False, num_workers=0)
+print(f'Shape of training set: {train_art10_images.shape}')
 # train_datalist = [{"image": train[i, -1:, ...]} for i in range(len(train))]
 
 # %% [markdown]
@@ -113,10 +139,10 @@ train_loader = DataLoader(train_data, batch_size=1, shuffle=False, num_workers=4
 # 1. `RandAffined` efficiently performs rotate, scale, shear, translate, etc. together based on PyTorch affine transform.
 
 # %%
-val_data = OCTDataset(val)
+val_data = OCTDataset(val_art10_images)
 # val_datalist = [{"image": val[i, -1:, ...]} for i in range(len(val))]
-val_loader = DataLoader(val_data, batch_size=1, shuffle=False, num_workers=4, persistent_workers=True)
-
+val_loader = DataLoader(val_data, batch_size=1, shuffle=False, num_workers=0)
+print(f'Shape of validation set: {val_art10_images.shape}')
 
 # %% [markdown]
 # ### Visualization of the training images
@@ -162,17 +188,19 @@ adv_loss = PatchAdversarialLoss(criterion="least_squares")
 adv_weight = 0.01
 perceptual_weight = 0.001
 
-tensorboard_dir = '/home/simone.sarrocco/thesis/project/models/diffusion_model/GenerativeModels/tutorials/generative/2d_vqgan/log'
+tensorboard_dir = '/home/simone.sarrocco/thesis/project/models/diffusion_model/GenerativeModels/tutorials/generative/2d_vqgan/only_art10/tensorboard_log'
 writer = SummaryWriter(log_dir=tensorboard_dir)
-
+# Define the directory to save checkpoints
+checkpoint_dir = "/home/simone.sarrocco/thesis/project/models/diffusion_model/GenerativeModels/tutorials/generative/2d_vqgan/only_art10/checkpoints"
+os.makedirs(checkpoint_dir, exist_ok=True)
 
 # %% [markdown]
 # ### Model training
 # Here, we are training our model for 100 epochs (training time: ~50 minutes).
 
 # %%
-n_epochs = 1000
-val_interval = 10
+n_epochs = 500
+val_interval = 5
 epoch_recon_loss_list = []
 epoch_gen_loss_list = []
 epoch_disc_loss_list = []
@@ -182,12 +210,17 @@ n_example_images = 1
 
 total_start = time.time()
 i = 0
+PSNR = PeakSignalNoiseRatio().to(device)
+SSIM = StructuralSimilarityIndexMeasure().to(device)
+# LPIPS = LearnedPerceptualImagePatchSimilarity(net_type='vgg', normalize=True).to(device)
+
 for epoch in range(n_epochs):
     model.train()
     discriminator.train()
     epoch_loss = 0
     gen_epoch_loss = 0
     disc_epoch_loss = 0
+    mse_batches, psnr_batches, ssim_batches, perceptual_batches = [], [], [], []
     progress_bar = tqdm(enumerate(train_loader), total=len(train_loader), ncols=110)
     progress_bar.set_description(f"Epoch {epoch}")
     for step, batch in progress_bar:
@@ -203,13 +236,6 @@ for epoch in range(n_epochs):
         p_loss = perceptual_loss(reconstruction.float(), images.float())
         generator_loss = adv_loss(logits_fake, target_is_real=True, for_discriminator=False)
         loss_g = recons_loss + quantization_loss + perceptual_weight * p_loss + adv_weight * generator_loss
-        writer.add_scalar('Loss/perceptual_loss', p_loss, i)
-        writer.add_scalar('Loss/generator_loss', generator_loss, i)
-        writer.add_scalar('Loss/recons_loss', recons_loss, i)
-        writer.add_scalar('Loss/total_loss_g', loss_g, i)
-
-        writer.add_image(f'Training/Input', images[:n_example_images, 0], i)
-        writer.add_image(f'Training/Output', reconstruction[:n_example_images, 0], i)
 
         loss_g.backward()
         optimizer_g.step()
@@ -225,8 +251,6 @@ for epoch in range(n_epochs):
 
         loss_d = adv_weight * discriminator_loss
 
-        writer.add_scalar('Loss/discriminator_loss', loss_d, i)
-
         loss_d.backward()
         optimizer_d.step()
 
@@ -241,13 +265,70 @@ for epoch in range(n_epochs):
                 "disc_loss": disc_epoch_loss / (step + 1),
             }
         )
+        with torch.no_grad():
+            # Log all the training losses to tensorboard
+            writer.add_scalar('Loss/perceptual_loss', p_loss, i)
+            writer.add_scalar('Loss/generator_loss', generator_loss, i)
+            writer.add_scalar('Loss/recons_loss', recons_loss, i)
+            writer.add_scalar('Loss/total_loss_g', loss_g, i)
+            writer.add_scalar('Loss/discriminator_loss', loss_d, i)
+
+            # Every epoch visualize input image and corresponding reconstruction on tensorboard
+            if i % 990 == 0:
+                writer.add_image(tag=f'Training/Input',
+                                 img_tensor=images[:n_example_images, 0, 8:-8, :],
+                                 global_step=i)
+                writer.add_image(tag=f'Training/Output', img_tensor=reconstruction[:n_example_images, 0, 8:-8, :],
+                                 global_step=i)
+            """
+            # Compute PSNR, SSIM, MSE, and LPIPS between input image and reconstructed image
+            mse_batch = mean_flat((reconstruction[:, :, 8:-8, :] - images[:, :, 8:-8, :]) ** 2)
+            psnr_batch = PSNR(reconstruction[:, :, 8:-8, :], images[:, :, 8:-8, :])
+            ssim_batch = SSIM(reconstruction[:, :, 8:-8, :], images[:, :, 8:-8, :])
+            perceptual_batch = perceptual_loss(reconstruction[:, :, 8:-8, :].float(), images[:, :, 8:-8, :].float())
+
+            mse_batches.append(mse_batch.mean().cpu())
+            psnr_batches.append(psnr_batch.cpu())
+            ssim_batches.append(ssim_batch.cpu())
+            perceptual_batches.append(perceptual_batch.cpu())
+
+            # output_3_channels = reconstruction[:, :, 8:-8, :].repeat(1, 3, 1, 1)  # (Batch, Channels, Height, Width)
+            # target_3_channels = images[:, :, 8:-8, :].repeat(1, 3, 1, 1)  # (Batch, Channels, Height, Width)
+            # lpips_batch = LPIPS(output_3_channels, target_3_channels)
+            # lpips_batches.append(lpips_batch.cpu())
+            """
     epoch_recon_loss_list.append(epoch_loss / (step + 1))
     epoch_gen_loss_list.append(gen_epoch_loss / (step + 1))
     epoch_disc_loss_list.append(disc_epoch_loss / (step + 1))
+    """
+    psnr_batches = np.asarray(psnr_batches, dtype=np.float32)
+    ssim_batches = np.asarray(ssim_batches, dtype=np.float32)
+    mse_batches = np.asarray(mse_batches, dtype=np.float32)
+    perceptual_batches = np.asarray(perceptual_batches, dtype=np.float32)
 
+    # Calculate averages
+    avg_psnr, std_psnr = np.mean(psnr_batches), np.std(psnr_batches)
+    avg_ssim, std_ssim = np.mean(ssim_batches), np.std(ssim_batches)
+    avg_mse, std_mse = np.mean(mse_batches), np.std(mse_batches)
+    avg_perceptual, std_perceptual = np.mean(perceptual_batches), np.std(perceptual_batches)
+
+    # Log average metrics to TensorBoard
+    metrics_summary = {
+        "PSNR": avg_psnr,
+        "SSIM": avg_ssim,
+        "MSE": avg_mse,
+        "PERC_LOSS": avg_perceptual,
+    }
+
+    for metric_name, value in metrics_summary.items():
+        writer.add_scalar(f"Training_metrics/{metric_name}", value.item(), epoch + 1)
+    print(
+        f"Training metrics, epoch {epoch + 1}: PSNR: {avg_psnr.item():.5f} ± {std_psnr.item():.5f} | SSIM: {avg_ssim.item():.5f} ± {std_ssim.item():.5f} | MSE: {avg_mse.item():.5f} ± {std_mse.item():.5f} | PERC_LOSS: {avg_perceptual.item():.5f} ± {std_perceptual.item():.5f}")
+    """
     if (epoch + 1) % val_interval == 0:
         model.eval()
         val_loss = 0
+        mse_batches, psnr_batches, ssim_batches, perceptual_batches = [], [], [], []
         with torch.no_grad():
             for val_step, batch in enumerate(val_loader, start=1):
                 images = batch.to(device)
@@ -258,19 +339,77 @@ for epoch in range(n_epochs):
                 # purposes
                 if val_step == 1:
                     intermediary_images.append(reconstruction[:n_example_images, 0])
-                    writer.add_image(f'Validation/Input', images[:n_example_images, 0], i)
-                    writer.add_image(f'Validation/Output', reconstruction[:n_example_images, 0], i)
+                    writer.add_image(tag=f'Validation/Input', img_tensor=torch.tensor(images[:n_example_images, 0], dtype=torch.float32), global_step=i)
+                    writer.add_image(tag=f'Validation/Output', img_tensor=torch.tensor(reconstruction[:n_example_images, 0], dtype=torch.float32), global_step=i)
 
                 recons_loss = l1_loss(reconstruction.float(), images.float())
 
                 val_loss += recons_loss.item()
 
+                # Compute PSNR, SSIM, MSE, and LPIPS between input image and reconstructed image
+                mse_batch = mean_flat((reconstruction[:, :, 8:-8, :] - images[:, :, 8:-8, :]) ** 2)
+                psnr_batch = PSNR(reconstruction[:, :, 8:-8, :], images[:, :, 8:-8, :])
+                ssim_batch = SSIM(reconstruction[:, :, 8:-8, :], images[:, :, 8:-8, :])
+                perceptual_batch = perceptual_loss(reconstruction[:, :, 8:-8, :].float(), images[:, :, 8:-8, :].float())
+
+                mse_batches.append(mse_batch.mean().cpu())
+                psnr_batches.append(psnr_batch.cpu())
+                ssim_batches.append(ssim_batch.cpu())
+                perceptual_batches.append(perceptual_batch.cpu())
+
+                # output_3_channels = reconstruction[:, :, 8:-8, :].repeat(1, 3, 1, 1)  # (Batch, Channels, Height, Width)
+                # target_3_channels = images[:, :, 8:-8, :].repeat(1, 3, 1, 1)  # (Batch, Channels, Height, Width)
+                # lpips_batch = LPIPS(output_3_channels, target_3_channels)
+                # lpips_batches.append(lpips_batch.cpu())
+
         val_loss /= val_step
         val_recon_epoch_loss_list.append(val_loss)
         writer.add_scalar('Loss/val_loss', val_loss, epoch+1)
 
+        psnr_batches = np.asarray(psnr_batches, dtype=np.float32)
+        ssim_batches = np.asarray(ssim_batches, dtype=np.float32)
+        mse_batches = np.asarray(mse_batches, dtype=np.float32)
+        perceptual_batches = np.asarray(perceptual_batches, dtype=np.float32)
+
+        # Calculate averages
+        avg_psnr, std_psnr = np.mean(psnr_batches), np.std(psnr_batches)
+        avg_ssim, std_ssim = np.mean(ssim_batches), np.std(ssim_batches)
+        avg_mse, std_mse = np.mean(mse_batches), np.std(mse_batches)
+        avg_perceptual, std_perceptual = np.mean(perceptual_batches), np.std(perceptual_batches)
+
+        # Log average metrics to TensorBoard
+        metrics_summary = {
+            "PSNR": avg_psnr,
+            "SSIM": avg_ssim,
+            "MSE": avg_mse,
+            "PERC_LOSS": avg_perceptual,
+        }
+
+        for metric_name, value in metrics_summary.items():
+            writer.add_scalar(f"Validation_metrics/{metric_name}", value.item(), epoch + 1)
+        print(
+            f"Validation metrics, epoch {epoch + 1}: PSNR: {avg_psnr.item():.5f} ± {std_psnr.item():.5f} | SSIM: {avg_ssim.item():.5f} ± {std_ssim.item():.5f} | MSE: {avg_mse.item():.5f} ± {std_mse.item():.5f} | PERC_LOSS: {avg_perceptual.item():.5f} ± {std_perceptual.item():.5f}")
+
+    # Save model checkpoint every 50 epochs
+    if (epoch + 1) % 10 == 0:
+        checkpoint_path = os.path.join(checkpoint_dir, f"vqgan_epoch_{epoch+1}.pth")
+
+        torch.save(model.state_dict(), checkpoint_path)  # Save only model weights
+
+        print(f"Checkpoint saved at {checkpoint_path}")
+
 total_time = time.time() - total_start
 print(f"train completed, total time: {total_time}.")
+# %% [markdown]
+# ### Cleanup data directory
+#
+# Remove directory if a temporary was used.
+
+# %%
+if directory is None:
+    shutil.rmtree(root_dir)
+
+
 # %% [markdown]
 # ### Learning curves
 
@@ -329,12 +468,3 @@ ax[1].axis("off")
 ax[1].title.set_text("Reconstruction")
 plt.show()
 """
-
-# %% [markdown]
-# ### Cleanup data directory
-#
-# Remove directory if a temporary was used.
-
-# %%
-if directory is None:
-    shutil.rmtree(root_dir)
