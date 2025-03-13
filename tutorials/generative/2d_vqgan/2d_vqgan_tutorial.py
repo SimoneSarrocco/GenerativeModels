@@ -403,11 +403,7 @@ for epoch in range(n_epochs):
 
     # Save model checkpoint every 50 epochs
     if (epoch + 1) % 10 == 0:
-        checkpoint_path = os.path.join(checkpoint_dir, f"vqgan_epoch_{epoch+1}.pth")
-
-        torch.save(model.state_dict(), checkpoint_path)  # Save only model weights
-
-        print(f"Checkpoint saved at {checkpoint_path}")
+        save_checkpoint(model, epoch + 1, save_dir=checkpoint_dir)
 
 total_time = time.time() - total_start
 print(f"train completed, total time: {total_time}.")
