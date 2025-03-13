@@ -60,12 +60,34 @@ from monai.utils import first, set_determinism
 from torch.nn import L1Loss
 from tqdm import tqdm
 from generative.losses import PatchAdversarialLoss, PerceptualLoss
+from generative.metrics import SSIMMetric
 from generative.networks.nets import VQVAE, PatchDiscriminator
 from dataset import OCTDataset
 from torch.utils.tensorboard import SummaryWriter
 from torchmetrics.image.lpip import LearnedPerceptualImagePatchSimilarity
 from torchmetrics.image import PeakSignalNoiseRatio, StructuralSimilarityIndexMeasure
 print_config()
+
+
+def save_checkpoint(model, epoch, save_dir="checkpoints"):
+    """
+    Saves the model in the .ckpt format required by BBDM.
+
+    Args:
+        model: The trained VQ-GAN model.
+        epoch: Current epoch number.
+        save_dir: Directory where checkpoints will be saved.
+    """
+    os.makedirs(save_dir, exist_ok=True)  # Ensure the directory exists
+
+    checkpoint = {
+        "state_dict": model.state_dict(),  # BBDM expects this format
+        "epoch": epoch,  # Save the current epoch for reference
+    }
+
+    checkpoint_path = os.path.join(save_dir, f"vqgan_epoch_{epoch}.ckpt")
+    torch.save(checkpoint, checkpoint_path)
+    print(f"Checkpoint saved: {checkpoint_path}")
 
 
 def mean_flat(tensor):
@@ -92,7 +114,7 @@ print(root_dir)
 # ## Set deterministic training for reproducibility
 
 # %%
-set_determinism(42)
+set_determinism(1927)
 
 # %% [markdown]
 # ## Setup MedNIST Dataset and training and validation dataloaders
@@ -125,8 +147,8 @@ for i in range(len(test)):
     test_pseudoart100_images.append(image)
 test_pseudoart100_images = torch.stack(test_pseudoart100_images, 0)
 
-train_data = OCTDataset(train_pseudoart100_images)
-train_loader = DataLoader(train_data, batch_size=1, shuffle=False, num_workers=0)
+train_data = OCTDataset(train_pseudoart100_images, transform=True)
+train_loader = DataLoader(train_data, batch_size=1, shuffle=True, num_workers=0)
 print(f'Shape of training set: {train_pseudoart100_images.shape}')
 # train_datalist = [{"image": train[i, -1:, ...]} for i in range(len(train))]
 
@@ -163,13 +185,13 @@ model = VQVAE(
     spatial_dims=2,
     in_channels=1,
     out_channels=1,
-    num_channels=(256, 512),
-    num_res_channels=512,
+    num_channels=(128, 128, 256, 256, 512),
+    num_res_channels=(128, 128, 256, 256, 512),
     num_res_layers=2,
-    downsample_parameters=((2, 4, 1, 1), (2, 4, 1, 1)),
-    upsample_parameters=((2, 4, 1, 1, 0), (2, 4, 1, 1, 0)),
-    num_embeddings=256,
-    embedding_dim=32,
+    downsample_parameters=((2, 4, 1, 1), (2, 4, 1, 1), (2, 4, 1, 1), (2, 4, 1, 1), (2, 4, 1, 1)),
+    upsample_parameters=((2, 4, 1, 1, 0), (2, 4, 1, 1, 0), (2, 4, 1, 1, 0), (2, 4, 1, 1, 0), (2, 4, 1, 1, 0)),
+    num_embeddings=16384,
+    embedding_dim=8,
 )
 model.to(device)
 
@@ -200,7 +222,7 @@ os.makedirs(checkpoint_dir, exist_ok=True)
 
 # %%
 n_epochs = 500
-val_interval = 5
+val_interval = 1
 epoch_recon_loss_list = []
 epoch_gen_loss_list = []
 epoch_disc_loss_list = []
@@ -211,7 +233,7 @@ n_example_images = 1
 total_start = time.time()
 i = 0
 PSNR = PeakSignalNoiseRatio().to(device)
-SSIM = StructuralSimilarityIndexMeasure().to(device)
+SSIM = SSIMMetric(spatial_dims=2)
 # LPIPS = LearnedPerceptualImagePatchSimilarity(net_type='vgg', normalize=True).to(device)
 
 for epoch in range(n_epochs):
@@ -339,8 +361,8 @@ for epoch in range(n_epochs):
                 # purposes
                 if val_step == 1:
                     intermediary_images.append(reconstruction[:n_example_images, 0])
-                    writer.add_image(tag=f'Validation/Input', img_tensor=torch.tensor(images[:n_example_images, 0], dtype=torch.float32), global_step=i)
-                    writer.add_image(tag=f'Validation/Output', img_tensor=torch.tensor(reconstruction[:n_example_images, 0], dtype=torch.float32), global_step=i)
+                    writer.add_image(tag=f'Validation/Input', img_tensor=images[:n_example_images, 0], global_step=i)
+                    writer.add_image(tag=f'Validation/Output', img_tensor=reconstruction[:n_example_images, 0], global_step=i)
 
                 recons_loss = l1_loss(reconstruction.float(), images.float())
 
@@ -349,7 +371,7 @@ for epoch in range(n_epochs):
                 # Compute PSNR, SSIM, MSE, and LPIPS between input image and reconstructed image
                 mse_batch = mean_flat((reconstruction[:, :, 8:-8, :] - images[:, :, 8:-8, :]) ** 2)
                 psnr_batch = PSNR(reconstruction[:, :, 8:-8, :], images[:, :, 8:-8, :])
-                ssim_batch = SSIM(reconstruction[:, :, 8:-8, :], images[:, :, 8:-8, :])
+                ssim_batch = SSIM._compute_metric(reconstruction[:, :, 8:-8, :], images[:, :, 8:-8, :])
                 perceptual_batch = perceptual_loss(reconstruction[:, :, 8:-8, :].float(), images[:, :, 8:-8, :].float())
 
                 mse_batches.append(mse_batch.mean().cpu())
@@ -390,13 +412,9 @@ for epoch in range(n_epochs):
         print(
             f"Validation metrics, epoch {epoch + 1}: PSNR: {avg_psnr.item():.5f} ± {std_psnr.item():.5f} | SSIM: {avg_ssim.item():.5f} ± {std_ssim.item():.5f} | MSE: {avg_mse.item():.5f} ± {std_mse.item():.5f} | PERC_LOSS: {avg_perceptual.item():.5f} ± {std_perceptual.item():.5f}")
 
-    # Save model checkpoint every 50 epochs
+    # Save model checkpoint every 10 epochs
     if (epoch + 1) % 10 == 0:
-        checkpoint_path = os.path.join(checkpoint_dir, f"vqgan_epoch_{epoch+1}.pth")
-
-        torch.save(model.state_dict(), checkpoint_path)  # Save only model weights
-
-        print(f"Checkpoint saved at {checkpoint_path}")
+        save_checkpoint(model, epoch + 1, save_dir=checkpoint_dir)
 
 total_time = time.time() - total_start
 print(f"train completed, total time: {total_time}.")
