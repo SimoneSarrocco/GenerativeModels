@@ -285,7 +285,7 @@ for epoch in range(n_epochs):
             writer.add_scalar('Loss/discriminator_loss', loss_d, i)
 
             # Every epoch visualize input image and corresponding reconstruction on tensorboard
-            if i % 990 == 0:
+            if i % 1980 == 0:
                 writer.add_image(tag=f'Training/Input',
                                  img_tensor=images[:n_example_images, 0, 8:-8, :],
                                  global_step=i)
