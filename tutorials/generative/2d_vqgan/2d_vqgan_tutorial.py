@@ -151,13 +151,13 @@ model = VQVAE(
     spatial_dims=2,
     in_channels=1,
     out_channels=1,
-    num_channels=(256, 512),
+    num_channels=(128, 128, 256, 256, 512),
     num_res_channels=512,
     num_res_layers=2,
-    downsample_parameters=((2, 4, 1, 1), (2, 4, 1, 1)),
-    upsample_parameters=((2, 4, 1, 1, 0), (2, 4, 1, 1, 0)),
-    num_embeddings=256,
-    embedding_dim=32,
+    downsample_parameters=((2, 4, 1, 1), (2, 4, 1, 1), (2, 4, 1, 1), (2, 4, 1, 1), (2, 4, 1, 1)),
+    upsample_parameters=((2, 4, 1, 1, 0), (2, 4, 1, 1, 0), (2, 4, 1, 1, 0), (2, 4, 1, 1, 0), (2, 4, 1, 1, 0)),
+    num_embeddings=16384,
+    embedding_dim=8,
 )
 model.to(device)
 
@@ -188,7 +188,7 @@ os.makedirs(checkpoint_dir, exist_ok=True)
 
 # %%
 n_epochs = 500
-val_interval = 5
+val_interval = 1
 epoch_recon_loss_list = []
 epoch_gen_loss_list = []
 epoch_disc_loss_list = []
@@ -327,8 +327,8 @@ for epoch in range(n_epochs):
                 # purposes
                 if val_step == 1:
                     intermediary_images.append(reconstruction[:n_example_images, 0])
-                    writer.add_image(tag=f'Validation/Input', img_tensor=torch.tensor(images[:n_example_images, 0], dtype=torch.float32), global_step=i)
-                    writer.add_image(tag=f'Validation/Output', img_tensor=torch.tensor(reconstruction[:n_example_images, 0], dtype=torch.float32), global_step=i)
+                    writer.add_image(tag=f'Validation/Input', img_tensor=images[:n_example_images, 0], global_step=i)
+                    writer.add_image(tag=f'Validation/Output', img_tensor=reconstruction[:n_example_images, 0], global_step=i)
 
                 recons_loss = l1_loss(reconstruction.float(), images.float())
 
