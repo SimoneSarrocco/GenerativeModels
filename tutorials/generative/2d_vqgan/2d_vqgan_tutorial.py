@@ -61,11 +61,33 @@ from torch.nn import L1Loss
 from tqdm import tqdm
 from generative.losses import PatchAdversarialLoss, PerceptualLoss
 from generative.networks.nets import VQVAE, PatchDiscriminator
+from generative.metrics.ssim import SSIMMetric
 from dataset import OCTDataset
 from torch.utils.tensorboard import SummaryWriter
 from torchmetrics.image.lpip import LearnedPerceptualImagePatchSimilarity
 from torchmetrics.image import PeakSignalNoiseRatio, StructuralSimilarityIndexMeasure
 print_config()
+
+
+def save_checkpoint(model, epoch, save_dir="checkpoints"):
+    """
+    Saves the model in the .ckpt format required by BBDM.
+
+    Args:
+        model: The trained VQ-GAN model.
+        epoch: Current epoch number.
+        save_dir: Directory where checkpoints will be saved.
+    """
+    os.makedirs(save_dir, exist_ok=True)  # Ensure the directory exists
+
+    checkpoint = {
+        "state_dict": model.state_dict(),  # BBDM expects this format
+        "epoch": epoch,  # Save the current epoch for reference
+    }
+
+    checkpoint_path = os.path.join(save_dir, f"vqgan_epoch_{epoch}.ckpt")
+    torch.save(checkpoint, checkpoint_path)
+    print(f"Checkpoint saved: {checkpoint_path}")
 
 
 def mean_flat(tensor):
@@ -92,7 +114,7 @@ print(root_dir)
 # ## Set deterministic training for reproducibility
 
 # %%
-set_determinism(42)
+set_determinism(1927)
 
 # %% [markdown]
 # ## Setup MedNIST Dataset and training and validation dataloaders
@@ -114,7 +136,7 @@ test_data_split = torch.tensor(test).view((-1, 1, 496, 768))  # Pass shape as a 
 
 
 train_data = OCTDataset(train_data_split)
-train_loader = DataLoader(train_data, batch_size=1, shuffle=False, num_workers=0)
+train_loader = DataLoader(train_data, batch_size=1, shuffle=True, num_workers=0)
 print(f'Shape of training set: {train_data_split.shape}')
 # train_datalist = [{"image": train[i, -1:, ...]} for i in range(len(train))]
 
@@ -199,7 +221,8 @@ n_example_images = 1
 total_start = time.time()
 i = 0
 PSNR = PeakSignalNoiseRatio().to(device)
-SSIM = StructuralSimilarityIndexMeasure().to(device)
+# SSIM = StructuralSimilarityIndexMeasure().to(device)
+SSIM = SSIMMetric(spatial_dims=2)
 # LPIPS = LearnedPerceptualImagePatchSimilarity(net_type='vgg', normalize=True).to(device)
 
 for epoch in range(n_epochs):
@@ -262,7 +285,7 @@ for epoch in range(n_epochs):
             writer.add_scalar('Loss/discriminator_loss', loss_d, i)
 
             # Every epoch visualize input image and corresponding reconstruction on tensorboard
-            if i % 1980 == 0:
+            if i % 990 == 0:
                 writer.add_image(tag=f'Training/Input',
                                  img_tensor=images[:n_example_images, 0, 8:-8, :],
                                  global_step=i)
@@ -337,7 +360,7 @@ for epoch in range(n_epochs):
                 # Compute PSNR, SSIM, MSE, and LPIPS between input image and reconstructed image
                 mse_batch = mean_flat((reconstruction[:, :, 8:-8, :] - images[:, :, 8:-8, :]) ** 2)
                 psnr_batch = PSNR(reconstruction[:, :, 8:-8, :], images[:, :, 8:-8, :])
-                ssim_batch = SSIM(reconstruction[:, :, 8:-8, :], images[:, :, 8:-8, :])
+                ssim_batch = SSIM._compute_metric(reconstruction[:, :, 8:-8, :], images[:, :, 8:-8, :])
                 perceptual_batch = perceptual_loss(reconstruction[:, :, 8:-8, :].float(), images[:, :, 8:-8, :].float())
 
                 mse_batches.append(mse_batch.mean().cpu())
