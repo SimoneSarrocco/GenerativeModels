@@ -148,7 +148,7 @@ for i in range(len(test)):
 test_pseudoart100_images = torch.stack(test_pseudoart100_images, 0)
 
 train_data = OCTDataset(train_pseudoart100_images, transform=True)
-train_loader = DataLoader(train_data, batch_size=1, shuffle=True, num_workers=0)
+train_loader = DataLoader(train_data, batch_size=1, shuffle=True, num_workers=64)
 print(f'Shape of training set: {train_pseudoart100_images.shape}')
 # train_datalist = [{"image": train[i, -1:, ...]} for i in range(len(train))]
 
@@ -160,11 +160,14 @@ print(f'Shape of training set: {train_pseudoart100_images.shape}')
 # 1. `ScaleIntensityRanged` extracts intensity range [0, 255] and scales to [0, 1].
 # 1. `RandAffined` efficiently performs rotate, scale, shear, translate, etc. together based on PyTorch affine transform.
 
+final_val_pseudoart100_images = torch.cat([val_pseudoart100_images, test_pseudoart100_images], dim=0)
+
 # %%
-val_data = OCTDataset(val_pseudoart100_images)
+val_data = OCTDataset(final_val_pseudoart100_images, transform=False)
 # val_datalist = [{"image": val[i, -1:, ...]} for i in range(len(val))]
-val_loader = DataLoader(val_data, batch_size=1, shuffle=False, num_workers=0)
-print(f'Shape of validation set: {val_pseudoart100_images.shape}')
+val_loader = DataLoader(val_data, batch_size=1, shuffle=False, num_workers=64)
+print(f'Shape of validation set: {final_val_pseudoart100_images.shape}')
+
 
 # %% [markdown]
 # ### Visualization of the training images
@@ -185,13 +188,13 @@ model = VQVAE(
     spatial_dims=2,
     in_channels=1,
     out_channels=1,
-    num_channels=(128, 128, 256, 256, 512),
-    num_res_channels=(128, 128, 256, 256, 512),
+    num_channels=(256, 512),
+    num_res_channels=512,
     num_res_layers=2,
-    downsample_parameters=((2, 4, 1, 1), (2, 4, 1, 1), (2, 4, 1, 1), (2, 4, 1, 1), (2, 4, 1, 1)),
-    upsample_parameters=((2, 4, 1, 1, 0), (2, 4, 1, 1, 0), (2, 4, 1, 1, 0), (2, 4, 1, 1, 0), (2, 4, 1, 1, 0)),
-    num_embeddings=16384,
-    embedding_dim=8,
+    downsample_parameters=((2, 4, 1, 1), (2, 4, 1, 1)),
+    upsample_parameters=((2, 4, 1, 1, 0), (2, 4, 1, 1, 0)),
+    num_embeddings=256,
+    embedding_dim=32,
 )
 model.to(device)
 
@@ -221,7 +224,7 @@ os.makedirs(checkpoint_dir, exist_ok=True)
 # Here, we are training our model for 100 epochs (training time: ~50 minutes).
 
 # %%
-n_epochs = 500
+n_epochs = 100
 val_interval = 1
 epoch_recon_loss_list = []
 epoch_gen_loss_list = []
