@@ -134,24 +134,15 @@ train_data_split = torch.tensor(train).view((-1, 1, 496, 768))  # Pass shape as 
 val_data_split = torch.tensor(val).view((-1, 1, 496, 768))  # Pass shape as a tuple
 test_data_split = torch.tensor(test).view((-1, 1, 496, 768))  # Pass shape as a tuple
 
+final_val_data_split = torch.cat([val_data_split, test_data_split], dim=0)
 
-train_data = OCTDataset(train_data_split)
-train_loader = DataLoader(train_data, batch_size=1, shuffle=True, num_workers=0)
+train_data = OCTDataset(train_data_split, transform=True)
+train_loader = DataLoader(train_data, batch_size=1, shuffle=True, num_workers=64)
 print(f'Shape of training set: {train_data_split.shape}')
-# train_datalist = [{"image": train[i, -1:, ...]} for i in range(len(train))]
 
-# %% [markdown]
-# Here we use transforms to augment the training dataset:
-#
-# 1. `LoadImaged` loads the hands images from files.
-# 1. `EnsureChannelFirstd` ensures the original data to construct "channel first" shape.
-# 1. `ScaleIntensityRanged` extracts intensity range [0, 255] and scales to [0, 1].
-# 1. `RandAffined` efficiently performs rotate, scale, shear, translate, etc. together based on PyTorch affine transform.
-
-# %%
-val_data = OCTDataset(val_data_split)
+val_data = OCTDataset(final_val_data_split)
 # val_datalist = [{"image": val[i, -1:, ...]} for i in range(len(val))]
-val_loader = DataLoader(val_data, batch_size=1, shuffle=False, num_workers=0)
+val_loader = DataLoader(val_data, batch_size=1, shuffle=False, num_workers=64)
 print(f'Shape of validation set: {val_data_split.shape}')
 
 # %% [markdown]
@@ -173,13 +164,13 @@ model = VQVAE(
     spatial_dims=2,
     in_channels=1,
     out_channels=1,
-    num_channels=(128, 128, 256, 256, 512),
+    num_channels=(256, 512),
     num_res_channels=512,
     num_res_layers=2,
-    downsample_parameters=((2, 4, 1, 1), (2, 4, 1, 1), (2, 4, 1, 1), (2, 4, 1, 1), (2, 4, 1, 1)),
-    upsample_parameters=((2, 4, 1, 1, 0), (2, 4, 1, 1, 0), (2, 4, 1, 1, 0), (2, 4, 1, 1, 0), (2, 4, 1, 1, 0)),
-    num_embeddings=16384,
-    embedding_dim=8,
+    downsample_parameters=((2, 4, 1, 1), (2, 4, 1, 1)),
+    upsample_parameters=((2, 4, 1, 1, 0), (2, 4, 1, 1, 0)),
+    num_embeddings=256,
+    embedding_dim=32,
 )
 model.to(device)
 
@@ -198,10 +189,10 @@ adv_loss = PatchAdversarialLoss(criterion="least_squares")
 adv_weight = 0.01
 perceptual_weight = 0.001
 
-tensorboard_dir = '/home/simone.sarrocco/thesis/project/models/diffusion_model/GenerativeModels/tutorials/generative/2d_vqgan/all_images/tensorboard_log'
+tensorboard_dir = '/home/simone.sarrocco/thesis/project/models/diffusion_model/GenerativeModels/tutorials/generative/2d_vqgan/all_images_3rd/tensorboard_log'
 writer = SummaryWriter(log_dir=tensorboard_dir)
 # Define the directory to save checkpoints
-checkpoint_dir = "/home/simone.sarrocco/thesis/project/models/diffusion_model/GenerativeModels/tutorials/generative/2d_vqgan/all_images/checkpoints"
+checkpoint_dir = "/home/simone.sarrocco/thesis/project/models/diffusion_model/GenerativeModels/tutorials/generative/2d_vqgan/all_images_3rd/checkpoints"
 os.makedirs(checkpoint_dir, exist_ok=True)
 
 # %% [markdown]
@@ -209,7 +200,7 @@ os.makedirs(checkpoint_dir, exist_ok=True)
 # Here, we are training our model for 100 epochs (training time: ~50 minutes).
 
 # %%
-n_epochs = 500
+n_epochs = 100
 val_interval = 1
 epoch_recon_loss_list = []
 epoch_gen_loss_list = []
