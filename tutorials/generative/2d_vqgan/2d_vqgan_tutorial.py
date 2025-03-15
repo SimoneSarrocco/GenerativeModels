@@ -164,11 +164,11 @@ model = VQVAE(
     spatial_dims=2,
     in_channels=1,
     out_channels=1,
-    num_channels=(256, 512),
-    num_res_channels=512,
+    num_channels=(64, 128, 256),
+    num_res_channels=(64, 128, 256),
     num_res_layers=2,
-    downsample_parameters=((2, 4, 1, 1), (2, 4, 1, 1)),
-    upsample_parameters=((2, 4, 1, 1, 0), (2, 4, 1, 1, 0)),
+    downsample_parameters=((2, 4, 1, 1), (2, 4, 1, 1), (2, 4, 1, 1)),
+    upsample_parameters=((2, 4, 1, 1, 0), (2, 4, 1, 1, 0), (2, 4, 1, 1, 0)),
     num_embeddings=256,
     embedding_dim=32,
 )
@@ -189,10 +189,10 @@ adv_loss = PatchAdversarialLoss(criterion="least_squares")
 adv_weight = 0.01
 perceptual_weight = 0.001
 
-tensorboard_dir = '/home/simone.sarrocco/thesis/project/models/diffusion_model/GenerativeModels/tutorials/generative/2d_vqgan/all_images_3rd/tensorboard_log'
+tensorboard_dir = '/home/simone.sarrocco/thesis/project/models/diffusion_model/GenerativeModels/tutorials/generative/2d_vqgan/all_images_4th/tensorboard_log'
 writer = SummaryWriter(log_dir=tensorboard_dir)
 # Define the directory to save checkpoints
-checkpoint_dir = "/home/simone.sarrocco/thesis/project/models/diffusion_model/GenerativeModels/tutorials/generative/2d_vqgan/all_images_3rd/checkpoints"
+checkpoint_dir = "/home/simone.sarrocco/thesis/project/models/diffusion_model/GenerativeModels/tutorials/generative/2d_vqgan/all_images_4th/checkpoints"
 os.makedirs(checkpoint_dir, exist_ok=True)
 
 # %% [markdown]
