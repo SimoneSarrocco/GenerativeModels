@@ -130,20 +130,24 @@ train = np.load('/home/simone.sarrocco/thesis/project/data/train_set_patient_spl
 val = np.load('/home/simone.sarrocco/thesis/project/data/val_set_patient_split.npz')['images']
 test = np.load('/home/simone.sarrocco/thesis/project/data/test_set_patient_split.npz')['images']
 
-train_data_split = torch.tensor(train).view((-1, 1, 496, 768))  # Pass shape as a tuple
-val_data_split = torch.tensor(val).view((-1, 1, 496, 768))  # Pass shape as a tuple
-test_data_split = torch.tensor(test).view((-1, 1, 496, 768))  # Pass shape as a tuple
+# train_data_split = torch.tensor(train).view((-1, 1, 496, 768))  # Pass shape as a tuple
+# val_data_split = torch.tensor(val).view((-1, 1, 496, 768))  # Pass shape as a tuple
+# test_data_split = torch.tensor(test).view((-1, 1, 496, 768))  # Pass shape as a tuple
 
-final_val_data_split = torch.cat([val_data_split, test_data_split], dim=0)
+# final_val_data_split = torch.cat([val_data_split, test_data_split], dim=0)
 
-train_data = OCTDataset(train_data_split, transform=True)
+# train_data = OCTDataset(train_data_split, transform=True)
+train_data = OCTDataset(train, transform=True)
 train_loader = DataLoader(train_data, batch_size=1, shuffle=True, num_workers=64)
-print(f'Shape of training set: {train_data_split.shape}')
+# print(f'Shape of training set: {train_data_split.shape}')
+print(f'Shape of training set: {train.shape}')
 
-val_data = OCTDataset(final_val_data_split)
+# val_data = OCTDataset(final_val_data_split)
+val_data = OCTDataset(val, transform=False)
 # val_datalist = [{"image": val[i, -1:, ...]} for i in range(len(val))]
 val_loader = DataLoader(val_data, batch_size=1, shuffle=False, num_workers=64)
-print(f'Shape of validation set: {val_data_split.shape}')
+# print(f'Shape of validation set: {val_data_split.shape}')
+print(f'Shape of validation set: {val.shape}')
 
 # %% [markdown]
 # ### Visualization of the training images
@@ -174,7 +178,7 @@ model = VQVAE(
 )
 model.to(device)
 
-discriminator = PatchDiscriminator(spatial_dims=2, in_channels=1, num_layers_d=3, num_channels=64)
+discriminator = PatchDiscriminator(spatial_dims=2, in_channels=2, num_layers_d=3, num_channels=64)
 discriminator.to(device)
 
 perceptual_loss = PerceptualLoss(spatial_dims=2, network_type="alex")
@@ -189,10 +193,10 @@ adv_loss = PatchAdversarialLoss(criterion="least_squares")
 adv_weight = 0.01
 perceptual_weight = 0.001
 
-tensorboard_dir = '/home/simone.sarrocco/thesis/project/models/diffusion_model/GenerativeModels/tutorials/generative/2d_vqgan/all_images_4th/tensorboard_log'
+tensorboard_dir = '/home/simone.sarrocco/thesis/project/models/diffusion_model/GenerativeModels/tutorials/generative/2d_vqgan/denoising_model_2nd/tensorboard_log'
 writer = SummaryWriter(log_dir=tensorboard_dir)
 # Define the directory to save checkpoints
-checkpoint_dir = "/home/simone.sarrocco/thesis/project/models/diffusion_model/GenerativeModels/tutorials/generative/2d_vqgan/all_images_4th/checkpoints"
+checkpoint_dir = "/home/simone.sarrocco/thesis/project/models/diffusion_model/GenerativeModels/tutorials/generative/2d_vqgan/denoising_model_2nd/checkpoints"
 os.makedirs(checkpoint_dir, exist_ok=True)
 
 # %% [markdown]
@@ -225,17 +229,23 @@ for epoch in range(n_epochs):
     mse_batches, psnr_batches, ssim_batches, perceptual_batches = [], [], [], []
     progress_bar = tqdm(enumerate(train_loader), total=len(train_loader), ncols=110)
     progress_bar.set_description(f"Epoch {epoch}")
-    for step, batch in progress_bar:
-        images = batch.to(device)
+    for step, (input_image, target_image) in progress_bar:
+        input_image = input_image.to(device)
+        target_image = target_image.to(device)
         optimizer_g.zero_grad(set_to_none=True)
 
         # Generator part
-        reconstruction, quantization_loss = model(images=images)
+        # reconstruction, quantization_loss = model(images=images)
+        reconstruction, quantization_loss = model(images=input_image)
         i += 1
-        logits_fake = discriminator(reconstruction.contiguous().float())[-1]
+        # logits_fake = discriminator(reconstruction.contiguous().float())[-1]
+        concatenation_input_output = torch.cat([input_image, reconstruction], dim=1)
+        logits_fake = discriminator(concatenation_input_output.contiguous().float())[-1]
 
-        recons_loss = l1_loss(reconstruction.float(), images.float())
-        p_loss = perceptual_loss(reconstruction.float(), images.float())
+        # recons_loss = l1_loss(reconstruction.float(), images.float())
+        recons_loss = l1_loss(reconstruction.float(), target_image.float())
+        # p_loss = perceptual_loss(reconstruction.float(), images.float())
+        p_loss = perceptual_loss(reconstruction.float(), target_image.float())
         generator_loss = adv_loss(logits_fake, target_is_real=True, for_discriminator=False)
         loss_g = recons_loss + quantization_loss + perceptual_weight * p_loss + adv_weight * generator_loss
 
@@ -245,9 +255,13 @@ for epoch in range(n_epochs):
         # Discriminator part
         optimizer_d.zero_grad(set_to_none=True)
 
-        logits_fake = discriminator(reconstruction.contiguous().detach())[-1]
+        # logits_fake = discriminator(reconstruction.contiguous().detach())[-1]
+        logits_fake = discriminator(concatenation_input_output.contiguous().detach())[-1]
         loss_d_fake = adv_loss(logits_fake, target_is_real=False, for_discriminator=True)
-        logits_real = discriminator(images.contiguous().detach())[-1]
+        # logits_real = discriminator(images.contiguous().detach())[-1]
+        concatenation_input_target = torch.cat([input_image, target_image], dim=1)
+        # logits_real = discriminator(target_image.contiguous().detach())[-1]  # todo
+        logits_real = discriminator(concatenation_input_target.contiguous().detach())[-1]  # todo
         loss_d_real = adv_loss(logits_real, target_is_real=True, for_discriminator=True)
         discriminator_loss = (loss_d_fake + loss_d_real) * 0.5
 
@@ -276,9 +290,14 @@ for epoch in range(n_epochs):
             writer.add_scalar('Loss/discriminator_loss', loss_d, i)
 
             # Every epoch visualize input image and corresponding reconstruction on tensorboard
-            if i % 1980 == 0:
+            if i % 990 == 0:
                 writer.add_image(tag=f'Training/Input',
-                                 img_tensor=images[:n_example_images, 0, 8:-8, :],
+                                 # img_tensor=images[:n_example_images, 0, 8:-8, :],
+                                 img_tensor=input_image[:n_example_images, 0, 8:-8, :],
+                                 global_step=i)
+                writer.add_image(tag=f'Training/Target',
+                                 # img_tensor=images[:n_example_images, 0, 8:-8, :],
+                                 img_tensor=target_image[:n_example_images, 0, 8:-8, :],
                                  global_step=i)
                 writer.add_image(tag=f'Training/Output', img_tensor=reconstruction[:n_example_images, 0, 8:-8, :],
                                  global_step=i)
@@ -332,27 +351,37 @@ for epoch in range(n_epochs):
         val_loss = 0
         mse_batches, psnr_batches, ssim_batches, perceptual_batches = [], [], [], []
         with torch.no_grad():
-            for val_step, batch in enumerate(val_loader, start=1):
-                images = batch.to(device)
+            for val_step, (input_image, target_image) in enumerate(val_loader, start=1):
+                # images = batch.to(device)
+                input_image = input_image.to(device)
+                target_image = target_image.to(device)
 
-                reconstruction, quantization_loss = model(images=images)
+                # reconstruction, quantization_loss = model(images=images)
+                reconstruction, quantization_loss = model(images=input_image)
 
                 # get the first sample from the first validation batch for visualization
                 # purposes
                 if val_step == 1:
                     intermediary_images.append(reconstruction[:n_example_images, 0])
-                    writer.add_image(tag=f'Validation/Input', img_tensor=images[:n_example_images, 0], global_step=i)
+                    # writer.add_image(tag=f'Validation/Input', img_tensor=images[:n_example_images, 0], global_step=i)
+                    writer.add_image(tag=f'Validation/Input', img_tensor=input_image[:n_example_images, 0], global_step=i)
+                    writer.add_image(tag=f'Validation/Target', img_tensor=target_image[:n_example_images, 0], global_step=i)
                     writer.add_image(tag=f'Validation/Output', img_tensor=reconstruction[:n_example_images, 0], global_step=i)
 
-                recons_loss = l1_loss(reconstruction.float(), images.float())
+                # recons_loss = l1_loss(reconstruction.float(), images.float())
+                recons_loss = l1_loss(reconstruction.float(), target_image.float())
 
                 val_loss += recons_loss.item()
 
                 # Compute PSNR, SSIM, MSE, and LPIPS between input image and reconstructed image
-                mse_batch = mean_flat((reconstruction[:, :, 8:-8, :] - images[:, :, 8:-8, :]) ** 2)
-                psnr_batch = PSNR(reconstruction[:, :, 8:-8, :], images[:, :, 8:-8, :])
-                ssim_batch = SSIM._compute_metric(reconstruction[:, :, 8:-8, :], images[:, :, 8:-8, :])
-                perceptual_batch = perceptual_loss(reconstruction[:, :, 8:-8, :].float(), images[:, :, 8:-8, :].float())
+                # mse_batch = mean_flat((reconstruction[:, :, 8:-8, :] - images[:, :, 8:-8, :]) ** 2)
+                mse_batch = mean_flat((reconstruction[:, :, 8:-8, :] - target_image[:, :, 8:-8, :]) ** 2)
+                # psnr_batch = PSNR(reconstruction[:, :, 8:-8, :], images[:, :, 8:-8, :])
+                psnr_batch = PSNR(reconstruction[:, :, 8:-8, :], target_image[:, :, 8:-8, :])
+                # ssim_batch = SSIM._compute_metric(reconstruction[:, :, 8:-8, :], images[:, :, 8:-8, :])
+                ssim_batch = SSIM._compute_metric(reconstruction[:, :, 8:-8, :], target_image[:, :, 8:-8, :])
+                # perceptual_batch = perceptual_loss(reconstruction[:, :, 8:-8, :].float(), images[:, :, 8:-8, :].float())
+                perceptual_batch = perceptual_loss(reconstruction[:, :, 8:-8, :].float(), target_image[:, :, 8:-8, :].float())
 
                 mse_batches.append(mse_batch.mean().cpu())
                 psnr_batches.append(psnr_batch.cpu())
