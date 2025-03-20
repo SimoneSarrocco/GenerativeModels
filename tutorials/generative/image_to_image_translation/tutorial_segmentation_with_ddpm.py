@@ -50,6 +50,9 @@
 
 # +
 import os
+import sys
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+
 import tempfile
 import time
 
@@ -62,12 +65,23 @@ from monai.apps import DecathlonDataset
 from monai.config import print_config
 from monai.data import DataLoader
 from monai.utils import set_determinism
-from torch.cuda.amp import GradScaler, autocast
+from torch.amp import autocast, GradScaler
 from tqdm import tqdm
-
+from dataset import OCTDataset
+from torch.utils.tensorboard import SummaryWriter
 from generative.inferers import DiffusionInferer
 from generative.networks.nets.diffusion_model_unet import DiffusionModelUNet
 from generative.networks.schedulers.ddpm import DDPMScheduler
+from generative.losses import PerceptualLoss
+from generative.metrics.ssim import SSIMMetric
+from torchmetrics.image import PeakSignalNoiseRatio, StructuralSimilarityIndexMeasure
+
+
+def mean_flat(tensor):
+    """
+    Take the mean over all non-batch dimensions.
+    """
+    return tensor.mean(dim=list(range(1, len(tensor.shape))))
 
 torch.multiprocessing.set_sharing_strategy("file_system")
 print_config()
@@ -96,89 +110,55 @@ set_determinism(42)
 #
 
 # +
-channel = 0  # 0 = Flair
-assert channel in [0, 1, 2, 3], "Choose a valid channel"
+train = np.load('/home/simone.sarrocco/thesis/project/data/train_set_patient_split.npz')['images']
+val = np.load('/home/simone.sarrocco/thesis/project/data/val_set_patient_split.npz')['images']
+test = np.load('/home/simone.sarrocco/thesis/project/data/test_set_patient_split.npz')['images']
+
+# train_data_split = torch.tensor(train).view((-1, 1, 496, 768))  # Pass shape as a tuple
+# val_data_split = torch.tensor(val).view((-1, 1, 496, 768))  # Pass shape as a tuple
+# test_data_split = torch.tensor(test).view((-1, 1, 496, 768))  # Pass shape as a tuple
+
+# final_val_data_split = torch.cat([val_data_split, test_data_split], dim=0)
+
+# train_data = OCTDataset(train_data_split, transform=True)
+train_data = OCTDataset(train, transform=True)
+train_loader = DataLoader(train_data, batch_size=1, shuffle=True, num_workers=64)
+# print(f'Shape of training set: {train_data_split.shape}')
+print(f'Shape of training set: {train.shape}')
+
+# val_data = OCTDataset(final_val_data_split)
+val_data = OCTDataset(val, transform=False)
+# val_datalist = [{"image": val[i, -1:, ...]} for i in range(len(val))]
+val_loader = DataLoader(val_data, batch_size=1, shuffle=False, num_workers=64)
+# print(f'Shape of validation set: {val_data_split.shape}')
+print(f'Shape of validation set: {val.shape}')
 
 
-train_transforms = transforms.Compose(
-    [
-        transforms.LoadImaged(keys=["image", "label"]),
-        transforms.EnsureChannelFirstd(keys=["image", "label"]),
-        transforms.Lambdad(keys=["image"], func=lambda x: x[channel, :, :, :]),
-        transforms.EnsureChannelFirstd(keys=["image"], channel_dim="no_channel"),
-        transforms.EnsureTyped(keys=["image", "label"]),
-        transforms.Orientationd(keys=["image", "label"], axcodes="RAS"),
-        transforms.Spacingd(keys=["image", "label"], pixdim=(3.0, 3.0, 2.0), mode=("bilinear", "nearest")),
-        transforms.CenterSpatialCropd(keys=["image", "label"], roi_size=(64, 64, 64)),
-        transforms.ScaleIntensityRangePercentilesd(keys="image", lower=0, upper=99.5, b_min=0, b_max=1),
-        transforms.RandSpatialCropd(keys=["image", "label"], roi_size=(64, 64, 1), random_size=False),
-        transforms.Lambdad(keys=["image", "label"], func=lambda x: x.squeeze(-1)),
-    ]
-)
-
-
-# +
-batch_size = 32
-
-train_ds = DecathlonDataset(
-    root_dir=root_dir,
-    task="Task01_BrainTumour",
-    section="training",  # validation
-    cache_rate=1.0,  # you may need a few Gb of RAM... Set to 0 otherwise
-    num_workers=4,
-    download=False,  # Set download to True if the dataset hasnt been downloaded yet
-    seed=0,
-    transform=train_transforms,
-)
-
-print(f"Length of training data: {len(train_ds)}")  # this gives the number of patients in the training set
-print(f'Train image shape {train_ds[0]["image"].shape}')
-print(f'Train label shape {train_ds[0]["label"].shape}')
-
-
-train_loader = DataLoader(
-    train_ds, batch_size=batch_size, shuffle=True, num_workers=4, drop_last=True, persistent_workers=True
-)
-# -
-
-# ## Preprocessing of the BRATS Dataset in 2D slices for validation
-# We download the BRATS validation dataset from the Decathlon dataset. We define the dataloader to load 2D slices as well as the corresponding ground truth tumor segmentation for validation.
-
-# +
-val_ds = DecathlonDataset(
-    root_dir=root_dir,
-    task="Task01_BrainTumour",
-    section="validation",
-    cache_rate=1.0,  # you may need a few Gb of RAM... Set to 0 otherwise
-    num_workers=4,
-    download=False,  # Set download to True if the dataset hasnt been downloaded yet
-    seed=0,
-    transform=train_transforms,
-)
-print(f"Length of training data: {len(val_ds)}")
-print(f'Validation Image shape {val_ds[0]["image"].shape}')
-print(f'Validation Label shape {val_ds[0]["label"].shape}')
-
-val_loader = DataLoader(
-    val_ds, batch_size=batch_size, shuffle=False, num_workers=4, drop_last=True, persistent_workers=True
-)
-# -
-
+run_number = '1st_run'
 #
 # ## Define network, scheduler, optimizer, and inferer
 #
 # At this step, we instantiate the MONAI components to create a DDPM, the UNET, the noise scheduler, and the inferer used for training and sampling. We are using the DDPM scheduler containing 1000 timesteps, and a 2D UNET with attention mechanisms in the 3rd level (`num_head_channels=64`).<br>
 #
-
+writer = SummaryWriter(log_dir=f'/home/simone.sarrocco/thesis/project/models/diffusion_model/GenerativeModels/tutorials/generative/image_to_image_translation/logs/{run_number}')
 device = torch.device("cuda")
+
+checkpoint_dir = f"/home/simone.sarrocco/thesis/project/models/diffusion_model/GenerativeModels/tutorials/generative/image_to_image_translation/checkpoints/{run_number}"
+os.makedirs(checkpoint_dir, exist_ok=True)
+
+PSNR = PeakSignalNoiseRatio().to(device)
+# SSIM = StructuralSimilarityIndexMeasure().to(device)
+SSIM = SSIMMetric(spatial_dims=2)
+PERC = PerceptualLoss(spatial_dims=2, device=device)
+# LPIPS = LearnedPerceptualImagePatchSimilarity(net_type='vgg', normalize=True).to(device)
 
 model = DiffusionModelUNet(
     spatial_dims=2,
     in_channels=2,
     out_channels=1,
-    num_channels=(64, 64, 64),
-    attention_levels=(False, False, True),
-    num_res_blocks=1,
+    num_channels=(128, 128, 256, 256, 512, 512),
+    attention_levels=(False, False, False, False, False, True),
+    num_res_blocks=2,
     num_head_channels=64,
     with_conditioning=False,
 )
@@ -195,34 +175,37 @@ inferer = DiffusionInferer(scheduler)
 # This is described in Equation 7 of the paper https://arxiv.org/pdf/2112.03145.pdf.
 
 n_epochs = 4000
-val_interval = 50
+val_interval = 1
 epoch_loss_list = []
 val_epoch_loss_list = []
-
+val_sample = 25
+save_interval = 50
 # +
+validation_samples_path = f'/home/simone.sarrocco/thesis/project/models/diffusion_model/GenerativeModels/tutorials/generative/image_to_image_translation/results/{run_number}/validation/output_samples'
+os.makedirs(validation_samples_path, exist_ok=True)
 
-
-scaler = GradScaler()
+scaler = GradScaler('cuda')
 total_start = time.time()
-
+i = 0
 for epoch in range(n_epochs):
     model.train()
     epoch_loss = 0
 
-    for step, data in enumerate(train_loader):
-        images = data["image"].to(device)
-        seg = data["label"].to(device)  # this is the ground truth segmentation
+    for step, (art10, pseudoart100) in enumerate(train_loader):
+        art10 = art10.to(device)
+        pseudoart100 = pseudoart100.to(device)
+        # seg = data["label"].to(device)  # this is the ground truth segmentation
         optimizer.zero_grad(set_to_none=True)
-        timesteps = torch.randint(0, 1000, (len(images),)).to(device)  # pick a random time step t
+        timesteps = torch.randint(0, 1000, (art10.shape[0],)).to(device)  # pick a random time step t
 
-        with autocast(enabled=True):
+        with autocast('cuda', enabled=True):
             # Generate random noise
-            noise = torch.randn_like(seg).to(device)
-            noisy_seg = scheduler.add_noise(
-                original_samples=seg, noise=noise, timesteps=timesteps
+            noise = torch.randn_like(pseudoart100).to(device)
+            noisy_pseudoart100 = scheduler.add_noise(
+                original_samples=pseudoart100, noise=noise, timesteps=timesteps
             )  # we only add noise to the segmentation mask
             combined = torch.cat(
-                (images, noisy_seg), dim=1
+                (art10, noisy_pseudoart100), dim=1
             )  # we concatenate the brain MR image with the noisy segmenatation mask, to condition the generation process
             prediction = model(x=combined, timesteps=timesteps)
             # Get model prediction
@@ -231,27 +214,112 @@ for epoch in range(n_epochs):
         scaler.step(optimizer)
         scaler.update()
         epoch_loss += loss.item()
+        i += 1
+        writer.add_scalar('Loss/train', loss.item(), i)
 
     epoch_loss_list.append(epoch_loss / (step + 1))
-    if (epoch) % val_interval == 0:
+    if (epoch+1) % val_interval == 0:
         model.eval()
         val_epoch_loss = 0
-        for step, data_val in enumerate(val_loader):
-            images = data_val["image"].to(device)
-            seg = data_val["label"].to(device)  # this is the ground truth segmentation
-            timesteps = torch.randint(0, 1000, (len(images),)).to(device)
+        for step, (art10, pseudoart100) in enumerate(val_loader):
+            art10 = art10.to(device)
+            pseudoart100 = pseudoart100.to(device)
+            # seg = data_val["label"].to(device)  # this is the ground truth segmentation
+            timesteps = torch.randint(0, 1000, (art10.shape[0],)).to(device)
             with torch.no_grad():
-                with autocast(enabled=True):
-                    noise = torch.randn_like(seg).to(device)
-                    noisy_seg = scheduler.add_noise(original_samples=seg, noise=noise, timesteps=timesteps)
-                    combined = torch.cat((images, noisy_seg), dim=1)
+                with autocast('cuda', enabled=True):
+                    noise = torch.randn_like(art10).to(device)
+                    noisy_pseudoart100 = scheduler.add_noise(original_samples=art10, noise=noise, timesteps=timesteps)
+                    combined = torch.cat((art10, noisy_pseudoart100), dim=1)
                     prediction = model(x=combined, timesteps=timesteps)
                     val_loss = F.mse_loss(prediction.float(), noise.float())
             val_epoch_loss += val_loss.item()
         print("Epoch", epoch, "Validation loss", val_epoch_loss / (step + 1))
+        writer.add_scalar("Loss/val", val_epoch_loss / (step+1), epoch+1)
         val_epoch_loss_list.append(val_epoch_loss / (step + 1))
 
-torch.save(model.state_dict(), "./segmodel.pt")
+    if (epoch+1) % val_sample == 0:
+        model.eval()
+        mse_batches, psnr_batches, ssim_batches, perceptual_batches = [], [], [], []
+        for step, (art10, pseudoart100) in enumerate(val_loader):
+            art10 = art10.to(device)
+            pseudoart100 = pseudoart100.to(device)
+            timesteps = torch.randint(0, 1000, (art10.shape[0],)).to(device)
+            noise = torch.randn_like(art10).to(device)
+            current_img = noise  # for the pseudoART100, we start from random noise.
+            combined = torch.cat(
+                (art10, noise), dim=1
+            )  # We concatenate the input ART10 to add anatomical information.
+
+            scheduler.set_timesteps(num_inference_steps=1000)
+            progress_bar = tqdm(scheduler.timesteps)
+            chain = torch.zeros(current_img.shape)
+            for t in progress_bar:  # go through the noising process
+                with autocast('cuda', enabled=False):
+                    with torch.no_grad():
+                        model_output = model(combined, timesteps=torch.Tensor((t,)).to(current_img.device))
+                        current_img, _ = scheduler.step(
+                            model_output, t, current_img
+                        )  # this is the prediction x_t at the time step t
+                        if t % 100 == 0:
+                            chain = torch.cat((chain, current_img.cpu()), dim=-1)
+                        combined = torch.cat(
+                            (art10, current_img), dim=1
+                        )  # in every step during the denoising process, the ART10 is concatenated to add anatomical information
+            with torch.no_grad():
+                """
+                if (step + 1) % 5 == 0:
+                    plt.style.use("default")
+                    plt.imshow(chain[0, 0, ..., 64:].cpu(), vmin=0, vmax=1, cmap="gray")
+                    plt.tight_layout()
+                    plt.axis("off")
+                    plt.savefig(f'{validation_samples_path}/Sample_{step + 1}.png')
+                    plt.close()
+                """
+                writer.add_image(f'Validation/Input', art10.squeeze(0), epoch + 1)
+                writer.add_image(f'Validation/Output', current_img.clamp(0., 1.).squeeze(0), epoch + 1)
+                writer.add_image(f'Validation/Target', pseudoart100.squeeze(0), epoch + 1)
+
+                # Compute PSNR, SSIM, MSE, and LPIPS between target image (pseudoART100) and denoised image (current_img)
+                mse_batch = mean_flat((current_img[:, :, 8:-8, :] - pseudoart100[:, :, 8:-8, :]) ** 2)
+                psnr_batch = PSNR(current_img[:, :, 8:-8, :], pseudoart100[:, :, 8:-8, :])
+                ssim_batch = SSIM._compute_metric(current_img[:, :, 8:-8, :], pseudoart100[:, :, 8:-8, :])
+                perceptual_batch = PERC(current_img[:, :, 8:-8, :], pseudoart100[:, :, 8:-8, :])
+
+                mse_batches.append(mse_batch.mean().cpu())
+                psnr_batches.append(psnr_batch.cpu())
+                ssim_batches.append(ssim_batch.cpu())
+                perceptual_batches.append(perceptual_batch.cpu())
+            break
+
+        psnr_batches = np.asarray(psnr_batches, dtype=np.float32)
+        ssim_batches = np.asarray(ssim_batches, dtype=np.float32)
+        mse_batches = np.asarray(mse_batches, dtype=np.float32)
+        perceptual_batches = np.asarray(perceptual_batches, dtype=np.float32)
+
+        # Calculate averages
+        avg_psnr, std_psnr = np.mean(psnr_batches), np.std(psnr_batches)
+        avg_ssim, std_ssim = np.mean(ssim_batches), np.std(ssim_batches)
+        avg_mse, std_mse = np.mean(mse_batches), np.std(mse_batches)
+        avg_perceptual, std_perceptual = np.mean(perceptual_batches), np.std(perceptual_batches)
+
+        # Log average metrics to TensorBoard
+        metrics_summary = {
+            "PSNR": avg_psnr,
+            "SSIM": avg_ssim,
+            "MSE": avg_mse,
+            "PERC_LOSS": avg_perceptual,
+        }
+
+        for metric_name, value in metrics_summary.items():
+            writer.add_scalar(f"Validation_metrics/{metric_name}", value.item(), epoch + 1)
+        print(
+            f"Validation metrics, epoch {epoch + 1}: PSNR: {avg_psnr.item():.5f} ± {std_psnr.item():.5f} | SSIM: {avg_ssim.item():.5f} ± {std_ssim.item():.5f} | MSE: {avg_mse.item():.5f} ± {std_mse.item():.5f} | PERC_LOSS: {avg_perceptual.item():.5f} ± {std_perceptual.item():.5f}")
+
+    if epoch % save_interval == 0:
+        torch.save(model.state_dict(), f"{checkpoint_dir}/ddpm_oct_model_{epoch+1}.pt")
+
+torch.save(model.state_dict(), f"{checkpoint_dir}/ddpm_oct_model_last_epoch.pt")
 total_time = time.time() - total_start
 print(f"train diffusion completed, total time: {total_time}.")
 plt.style.use("seaborn-bright")
@@ -269,7 +337,9 @@ plt.xticks(fontsize=12)
 plt.xlabel("Epochs", fontsize=16)
 plt.ylabel("Loss", fontsize=16)
 plt.legend(prop={"size": 14})
-plt.show()
+plt.savefig('/home/simone.sarrocco/thesis/project/models/diffusion_model/GenerativeModels/tutorials/generative/image_to_image_translation/results/losses.png')
+plt.close()
+# plt.show()
 # -
 
 #
@@ -278,10 +348,10 @@ plt.show()
 # Starting from random noise, we want to generate a segmentation mask for a brain MR image of our validation set.\
 # Due to the stochastic generation process, we can sample an ensemble of n different segmentation masks per MR image.\
 # First, we pick an image of our validation set, and check the ground truth segmentation mask.
-
+"""
 # +
 idx = 0
-data = val_ds[idx]
+data = val_data[idx]
 inputimg = data["image"][0, ...]  # Pick an input slice of the validation set to be segmented
 inputlabel = data["label"][0, ...]  # Check out the ground truth label mask. If it is empty, pick another input slice.
 
@@ -393,3 +463,4 @@ plt.imshow(var[0, ...].cpu(), vmin=0, vmax=1, cmap="jet")  # We plot the varianc
 plt.tight_layout()
 plt.axis("off")
 plt.show()
+"""
