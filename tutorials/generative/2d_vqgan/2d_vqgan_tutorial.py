@@ -147,10 +147,9 @@ val_images = torch.stack(val_images, 0)
 for i in range(len(test)):
     art10 = torch.tensor(train[i, :1, ...])
     pseudoart100 = torch.tensor(train[i, -1:, ...])
-    test.append(art10)
-    test.append(pseudoart100)
+    test_images.append(art10)
+    test_images.append(pseudoart100)
 test_images = torch.stack(test_images, 0)
-
 
 val_images = torch.cat((val_images, test_images), dim=0)
 
@@ -205,7 +204,7 @@ model.to(device)
 discriminator = PatchDiscriminator(spatial_dims=2, in_channels=1, num_layers_d=3, num_channels=64)
 discriminator.to(device)
 
-perceptual_loss = PerceptualLoss(spatial_dims=2, network_type="alex")
+perceptual_loss = PerceptualLoss(spatial_dims=2, network_type="alex", device='cuda')
 perceptual_loss.to(device)
 
 optimizer_g = torch.optim.Adam(params=model.parameters(), lr=1e-4)

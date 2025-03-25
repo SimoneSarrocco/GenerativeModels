@@ -59,6 +59,7 @@ class PerceptualLoss(nn.Module):
         pretrained: bool = True,
         pretrained_path: str | None = None,
         pretrained_state_dict_key: str | None = None,
+        device: torch.device = torch.device("cpu"),  # Allow specifying the device
     ):
         super().__init__()
 
@@ -74,6 +75,7 @@ class PerceptualLoss(nn.Module):
         if cache_dir:
             torch.hub.set_dir(cache_dir)
 
+        self.device = device  # Store the device for later usage
         self.spatial_dims = spatial_dims
         if spatial_dims == 3 and is_fake_3d is False:
             self.perceptual_function = MedicalNetPerceptualSimilarity(net=network_type, verbose=False)
@@ -90,6 +92,9 @@ class PerceptualLoss(nn.Module):
             self.perceptual_function = LPIPS(pretrained=pretrained, net=network_type, verbose=False)
         self.is_fake_3d = is_fake_3d
         self.fake_3d_ratio = fake_3d_ratio
+
+        # Move perceptual function to the correct device
+        self.perceptual_function.to(self.device)
 
     def _calculate_axis_loss(self, input: torch.Tensor, target: torch.Tensor, spatial_axis: int) -> torch.Tensor:
         """
@@ -117,7 +122,7 @@ class PerceptualLoss(nn.Module):
         channel_axis = 1
         input_slices = batchify_axis(x=input, fake_3d_perm=(spatial_axis, channel_axis) + tuple(preserved_axes))
         indices = torch.randperm(input_slices.shape[0])[: int(input_slices.shape[0] * self.fake_3d_ratio)].to(
-            input_slices.device
+            self.device
         )
         input_slices = torch.index_select(input_slices, dim=0, index=indices)
         target_slices = batchify_axis(x=target, fake_3d_perm=(spatial_axis, channel_axis) + tuple(preserved_axes))
@@ -135,6 +140,10 @@ class PerceptualLoss(nn.Module):
         """
         if target.shape != input.shape:
             raise ValueError(f"ground truth has differing shape ({target.shape}) from input ({input.shape})")
+
+        # Move input and target to the same device as the model
+        input = input.to(self.device)
+        target = target.to(self.device)
 
         if self.spatial_dims == 3 and self.is_fake_3d:
             # Compute 2.5D approach

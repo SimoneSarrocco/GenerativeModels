@@ -120,6 +120,3 @@ class OCTDataset(Dataset):
 
     def __len__(self):
         return len(self.images)
-
-    def __len__(self):
-        return len(self.image_pairs)
