@@ -122,32 +122,56 @@ set_determinism(1927)
 # (https://docs.monai.io/en/stable/apps.html#monai.apps.MedNISTDataset). In order to train faster, we will select just
 # one of the available classes ("HeadCT").
 
-# %%
-# train_data = MedNISTDataset(root_dir=root_dir, section="training", download=True, progress=False, seed=0)
-# train_datalist = [{"image": item["image"]} for item in train_data.data if item["class_name"] == "HeadCT"]
-
 train = np.load('/home/simone.sarrocco/thesis/project/data/train_set_patient_split.npz')['images']
 val = np.load('/home/simone.sarrocco/thesis/project/data/val_set_patient_split.npz')['images']
 test = np.load('/home/simone.sarrocco/thesis/project/data/test_set_patient_split.npz')['images']
 
-# train_data_split = torch.tensor(train).view((-1, 1, 496, 768))  # Pass shape as a tuple
-# val_data_split = torch.tensor(val).view((-1, 1, 496, 768))  # Pass shape as a tuple
-# test_data_split = torch.tensor(test).view((-1, 1, 496, 768))  # Pass shape as a tuple
+train_images = []
+val_images = []
+test_images = []
 
-# final_val_data_split = torch.cat([val_data_split, test_data_split], dim=0)
+for i in range(len(train)):
+    art10 = torch.tensor(train[i, :1, ...])
+    pseudoart100 = torch.tensor(train[i, -1:, ...])
+    train_images.append(art10)
+    train_images.append(pseudoart100)
+train_images = torch.stack(train_images, 0)
 
-# train_data = OCTDataset(train_data_split, transform=True)
-train_data = OCTDataset(train, transform=True)
-train_loader = DataLoader(train_data, batch_size=1, shuffle=True, num_workers=64)
-# print(f'Shape of training set: {train_data_split.shape}')
-print(f'Shape of training set: {train.shape}')
+for i in range(len(val)):
+    art10 = torch.tensor(train[i, :1, ...])
+    pseudoart100 = torch.tensor(train[i, -1:, ...])
+    val_images.append(art10)
+    val_images.append(pseudoart100)
+val_images = torch.stack(val_images, 0)
 
-# val_data = OCTDataset(final_val_data_split)
-val_data = OCTDataset(val, transform=False)
+for i in range(len(test)):
+    art10 = torch.tensor(train[i, :1, ...])
+    pseudoart100 = torch.tensor(train[i, -1:, ...])
+    test.append(art10)
+    test.append(pseudoart100)
+test_images = torch.stack(test_images, 0)
+
+
+val_images = torch.cat((val_images, test_images), dim=0)
+
+train_data = OCTDataset(train_images)
+train_loader = DataLoader(train_data, batch_size=1, shuffle=False, num_workers=0)
+print(f'Shape of training set: {train_images.shape}')
+# train_datalist = [{"image": train[i, -1:, ...]} for i in range(len(train))]
+
+# %% [markdown]
+# Here we use transforms to augment the training dataset:
+#
+# 1. `LoadImaged` loads the hands images from files.
+# 1. `EnsureChannelFirstd` ensures the original data to construct "channel first" shape.
+# 1. `ScaleIntensityRanged` extracts intensity range [0, 255] and scales to [0, 1].
+# 1. `RandAffined` efficiently performs rotate, scale, shear, translate, etc. together based on PyTorch affine transform.
+
+# %%
+val_data = OCTDataset(val_images)
 # val_datalist = [{"image": val[i, -1:, ...]} for i in range(len(val))]
-val_loader = DataLoader(val_data, batch_size=1, shuffle=False, num_workers=64)
-# print(f'Shape of validation set: {val_data_split.shape}')
-print(f'Shape of validation set: {val.shape}')
+val_loader = DataLoader(val_data, batch_size=1, shuffle=False, num_workers=0)
+print(f'Shape of validation set: {val_images.shape}')
 
 # %% [markdown]
 # ### Visualization of the training images
