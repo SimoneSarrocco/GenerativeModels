@@ -138,15 +138,15 @@ for i in range(len(train)):
 train_images = torch.stack(train_images, 0)
 
 for i in range(len(val)):
-    art10 = torch.tensor(train[i, :1, ...])
-    pseudoart100 = torch.tensor(train[i, -1:, ...])
+    art10 = torch.tensor(val[i, :1, ...])
+    pseudoart100 = torch.tensor(val[i, -1:, ...])
     val_images.append(art10)
     val_images.append(pseudoart100)
 val_images = torch.stack(val_images, 0)
 
 for i in range(len(test)):
-    art10 = torch.tensor(train[i, :1, ...])
-    pseudoart100 = torch.tensor(train[i, -1:, ...])
+    art10 = torch.tensor(test[i, :1, ...])
+    pseudoart100 = torch.tensor(test[i, -1:, ...])
     test_images.append(art10)
     test_images.append(pseudoart100)
 test_images = torch.stack(test_images, 0)
@@ -191,11 +191,11 @@ model = VQVAE(
     spatial_dims=2,
     in_channels=1,
     out_channels=1,
-    num_channels=(128, 256, 256, 512),
-    num_res_channels=(128, 256, 256, 512),
+    num_channels=(128, 256, 512),
+    num_res_channels=(128, 256, 512),
     num_res_layers=2,
-    downsample_parameters=((2, 4, 1, 1), (2, 4, 1, 1), (2, 4, 1, 1), (2, 4, 1, 1)),
-    upsample_parameters=((2, 4, 1, 1, 0), (2, 4, 1, 1, 0), (2, 4, 1, 1, 0), (2, 4, 1, 1, 0)),
+    downsample_parameters=((2, 4, 1, 1), (2, 4, 1, 1), (2, 4, 1, 1)),
+    upsample_parameters=((2, 4, 1, 1, 0), (2, 4, 1, 1, 0), (2, 4, 1, 1, 0)),
     num_embeddings=16384,  # this is "k"
     embedding_dim=4,  # this is "d"
 )
@@ -252,8 +252,8 @@ for epoch in range(n_epochs):
     mse_batches, psnr_batches, ssim_batches, perceptual_batches = [], [], [], []
     progress_bar = tqdm(enumerate(train_loader), total=len(train_loader), ncols=110)
     progress_bar.set_description(f"Epoch {epoch}")
-    for step, images in progress_bar:
-        images = images.to(device)
+    for step, batch in progress_bar:
+        images = batch.to(device)
         optimizer_g.zero_grad(set_to_none=True)
 
         # Generator part
@@ -361,9 +361,8 @@ for epoch in range(n_epochs):
         val_loss = 0
         mse_batches, psnr_batches, ssim_batches, perceptual_batches = [], [], [], []
         with torch.no_grad():
-            for val_step, images in enumerate(val_loader, start=1):
-                # images = batch.to(device)
-                images = images.to(device)
+            for val_step, batch in enumerate(val_loader, start=1):
+                images = batch.to(device)
 
                 # reconstruction, quantization_loss = model(images=images)
                 reconstruction, quantization_loss = model(images=images)
