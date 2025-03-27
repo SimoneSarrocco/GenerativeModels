@@ -96,7 +96,7 @@ root_dir = tempfile.mkdtemp() if directory is None else directory
 #
 # ## Set deterministic training for reproducibility
 
-set_determinism(42)
+set_determinism(10)
 
 #
 # # Preprocessing of the BRATS Dataset in 2D slices for training
@@ -134,7 +134,7 @@ val_loader = DataLoader(val_data, batch_size=1, shuffle=False, num_workers=64)
 print(f'Shape of validation set: {val.shape}')
 
 
-run_number = '1st_run'
+run_number = '4th_run'
 #
 # ## Define network, scheduler, optimizer, and inferer
 #
@@ -149,7 +149,7 @@ os.makedirs(checkpoint_dir, exist_ok=True)
 PSNR = PeakSignalNoiseRatio().to(device)
 # SSIM = StructuralSimilarityIndexMeasure().to(device)
 SSIM = SSIMMetric(spatial_dims=2)
-PERC = PerceptualLoss(spatial_dims=2, device=device)
+# PERC = PerceptualLoss(spatial_dims=2, device=device)
 # LPIPS = LearnedPerceptualImagePatchSimilarity(net_type='vgg', normalize=True).to(device)
 
 model = DiffusionModelUNet(
@@ -174,12 +174,12 @@ inferer = DiffusionInferer(scheduler)
 # In every step, we concatenate the original MR image to the noisy segmentation mask, to predict a slightly denoised segmentation mask.\
 # This is described in Equation 7 of the paper https://arxiv.org/pdf/2112.03145.pdf.
 
-n_epochs = 4000
-val_interval = 1
+n_epochs = 2000
+# val_interval = 1
 epoch_loss_list = []
 val_epoch_loss_list = []
-val_sample = 25
-save_interval = 50
+val_sample = 100
+save_interval = 100
 # +
 validation_samples_path = f'/home/simone.sarrocco/thesis/project/models/diffusion_model/GenerativeModels/tutorials/generative/image_to_image_translation/results/{run_number}/validation/output_samples'
 os.makedirs(validation_samples_path, exist_ok=True)
@@ -218,6 +218,7 @@ for epoch in range(n_epochs):
         writer.add_scalar('Loss/train', loss.item(), i)
 
     epoch_loss_list.append(epoch_loss / (step + 1))
+    """
     if (epoch+1) % val_interval == 0:
         model.eval()
         val_epoch_loss = 0
@@ -237,84 +238,85 @@ for epoch in range(n_epochs):
         print("Epoch", epoch, "Validation loss", val_epoch_loss / (step + 1))
         writer.add_scalar("Loss/val", val_epoch_loss / (step+1), epoch+1)
         val_epoch_loss_list.append(val_epoch_loss / (step + 1))
+    """
 
     if (epoch+1) % val_sample == 0:
         model.eval()
-        mse_batches, psnr_batches, ssim_batches, perceptual_batches = [], [], [], []
+        mse_batches, psnr_batches, ssim_batches = [], [], []
         for step, (art10, pseudoart100) in enumerate(val_loader):
-            art10 = art10.to(device)
-            pseudoart100 = pseudoart100.to(device)
-            timesteps = torch.randint(0, 1000, (art10.shape[0],)).to(device)
-            noise = torch.randn_like(art10).to(device)
-            current_img = noise  # for the pseudoART100, we start from random noise.
-            combined = torch.cat(
-                (art10, noise), dim=1
-            )  # We concatenate the input ART10 to add anatomical information.
+            if step == 0:
+                art10 = art10.to(device)
+                pseudoart100 = pseudoart100.to(device)
+                timesteps = torch.randint(0, 1000, (art10.shape[0],)).to(device)
+                noise = torch.randn_like(art10).to(device)
+                current_img = noise  # for the pseudoART100, we start from random noise.
+                combined = torch.cat(
+                    (art10, noise), dim=1
+                )  # We concatenate the input ART10 to add anatomical information.
 
-            scheduler.set_timesteps(num_inference_steps=1000)
-            progress_bar = tqdm(scheduler.timesteps)
-            chain = torch.zeros(current_img.shape)
-            for t in progress_bar:  # go through the noising process
-                with autocast('cuda', enabled=False):
-                    with torch.no_grad():
-                        model_output = model(combined, timesteps=torch.Tensor((t,)).to(current_img.device))
-                        current_img, _ = scheduler.step(
-                            model_output, t, current_img
-                        )  # this is the prediction x_t at the time step t
-                        if t % 100 == 0:
-                            chain = torch.cat((chain, current_img.cpu()), dim=-1)
-                        combined = torch.cat(
-                            (art10, current_img), dim=1
-                        )  # in every step during the denoising process, the ART10 is concatenated to add anatomical information
-            with torch.no_grad():
-                """
-                if (step + 1) % 5 == 0:
-                    plt.style.use("default")
-                    plt.imshow(chain[0, 0, ..., 64:].cpu(), vmin=0, vmax=1, cmap="gray")
-                    plt.tight_layout()
-                    plt.axis("off")
-                    plt.savefig(f'{validation_samples_path}/Sample_{step + 1}.png')
-                    plt.close()
-                """
-                writer.add_image(f'Validation/Input', art10.squeeze(0), epoch + 1)
-                writer.add_image(f'Validation/Output', current_img.clamp(0., 1.).squeeze(0), epoch + 1)
-                writer.add_image(f'Validation/Target', pseudoart100.squeeze(0), epoch + 1)
+                scheduler.set_timesteps(num_inference_steps=1000)
+                progress_bar = tqdm(scheduler.timesteps)
+                chain = torch.zeros(current_img.shape)
+                for t in progress_bar:  # go through the noising process
+                    with autocast('cuda', enabled=False):
+                        with torch.no_grad():
+                            model_output = model(combined, timesteps=torch.Tensor((t,)).to(current_img.device))
+                            current_img, _ = scheduler.step(
+                                model_output, t, current_img
+                            )  # this is the prediction x_t at the time step t
+                            if t % 100 == 0:
+                                chain = torch.cat((chain, current_img.cpu()), dim=-1)
+                            combined = torch.cat(
+                                (art10, current_img), dim=1
+                            )  # in every step during the denoising process, the ART10 is concatenated to add anatomical information
+                with torch.no_grad():
+                    """
+                    if (step + 1) % 5 == 0:
+                        plt.style.use("default")
+                        plt.imshow(chain[0, 0, ..., 64:].cpu(), vmin=0, vmax=1, cmap="gray")
+                        plt.tight_layout()
+                        plt.axis("off")
+                        plt.savefig(f'{validation_samples_path}/Sample_{step + 1}.png')
+                        plt.close()
+                    """
+                    writer.add_image(f'Validation/Input', art10.squeeze(0), epoch + 1)
+                    writer.add_image(f'Validation/Output', current_img.clamp(0., 1.).squeeze(0), epoch + 1)
+                    writer.add_image(f'Validation/Target', pseudoart100.squeeze(0), epoch + 1)
 
-                # Compute PSNR, SSIM, MSE, and LPIPS between target image (pseudoART100) and denoised image (current_img)
-                mse_batch = mean_flat((current_img[:, :, 8:-8, :] - pseudoart100[:, :, 8:-8, :]) ** 2)
-                psnr_batch = PSNR(current_img[:, :, 8:-8, :], pseudoart100[:, :, 8:-8, :])
-                ssim_batch = SSIM._compute_metric(current_img[:, :, 8:-8, :], pseudoart100[:, :, 8:-8, :])
-                perceptual_batch = PERC(current_img[:, :, 8:-8, :], pseudoart100[:, :, 8:-8, :])
+                    # Compute PSNR, SSIM, MSE, and LPIPS between target image (pseudoART100) and denoised image (current_img)
+                    mse_batch = mean_flat((current_img[:, :, 8:-8, :] - pseudoart100[:, :, 8:-8, :]) ** 2)
+                    psnr_batch = PSNR(current_img[:, :, 8:-8, :], pseudoart100[:, :, 8:-8, :])
+                    ssim_batch = SSIM._compute_metric(current_img[:, :, 8:-8, :], pseudoart100[:, :, 8:-8, :])
+                    # perceptual_batch = PERC(current_img[:, :, 8:-8, :], pseudoart100[:, :, 8:-8, :])
 
-                mse_batches.append(mse_batch.mean().cpu())
-                psnr_batches.append(psnr_batch.cpu())
-                ssim_batches.append(ssim_batch.cpu())
-                perceptual_batches.append(perceptual_batch.cpu())
-            break
+                    mse_batches.append(mse_batch.mean().cpu())
+                    psnr_batches.append(psnr_batch.cpu())
+                    ssim_batches.append(ssim_batch.cpu())
+                    # perceptual_batches.append(perceptual_batch.cpu())
 
         psnr_batches = np.asarray(psnr_batches, dtype=np.float32)
         ssim_batches = np.asarray(ssim_batches, dtype=np.float32)
         mse_batches = np.asarray(mse_batches, dtype=np.float32)
-        perceptual_batches = np.asarray(perceptual_batches, dtype=np.float32)
+        # perceptual_batches = np.asarray(perceptual_batches, dtype=np.float32)
 
         # Calculate averages
         avg_psnr, std_psnr = np.mean(psnr_batches), np.std(psnr_batches)
         avg_ssim, std_ssim = np.mean(ssim_batches), np.std(ssim_batches)
         avg_mse, std_mse = np.mean(mse_batches), np.std(mse_batches)
-        avg_perceptual, std_perceptual = np.mean(perceptual_batches), np.std(perceptual_batches)
+        # avg_perceptual, std_perceptual = np.mean(perceptual_batches), np.std(perceptual_batches)
 
         # Log average metrics to TensorBoard
         metrics_summary = {
             "PSNR": avg_psnr,
             "SSIM": avg_ssim,
             "MSE": avg_mse,
-            "PERC_LOSS": avg_perceptual,
+            # "PERC_LOSS": avg_perceptual,
         }
 
         for metric_name, value in metrics_summary.items():
             writer.add_scalar(f"Validation_metrics/{metric_name}", value.item(), epoch + 1)
         print(
-            f"Validation metrics, epoch {epoch + 1}: PSNR: {avg_psnr.item():.5f} ± {std_psnr.item():.5f} | SSIM: {avg_ssim.item():.5f} ± {std_ssim.item():.5f} | MSE: {avg_mse.item():.5f} ± {std_mse.item():.5f} | PERC_LOSS: {avg_perceptual.item():.5f} ± {std_perceptual.item():.5f}")
+            f"Validation metrics, epoch {epoch + 1}: PSNR: {avg_psnr.item():.5f} ± {std_psnr.item():.5f} | SSIM: {avg_ssim.item():.5f} ± {std_ssim.item():.5f} | MSE: {avg_mse.item():.5f} ± {std_mse.item():.5f}")
 
     if epoch % save_interval == 0:
         torch.save(model.state_dict(), f"{checkpoint_dir}/ddpm_oct_model_{epoch+1}.pt")
@@ -322,7 +324,8 @@ for epoch in range(n_epochs):
 torch.save(model.state_dict(), f"{checkpoint_dir}/ddpm_oct_model_last_epoch.pt")
 total_time = time.time() - total_start
 print(f"train diffusion completed, total time: {total_time}.")
-plt.style.use("seaborn-bright")
+
+"""plt.style.use("seaborn-bright")
 plt.title("Learning Curves Diffusion Model", fontsize=20)
 plt.plot(np.linspace(1, n_epochs, n_epochs), epoch_loss_list, color="C0", linewidth=2.0, label="Train")
 plt.plot(
@@ -338,7 +341,7 @@ plt.xlabel("Epochs", fontsize=16)
 plt.ylabel("Loss", fontsize=16)
 plt.legend(prop={"size": 14})
 plt.savefig('/home/simone.sarrocco/thesis/project/models/diffusion_model/GenerativeModels/tutorials/generative/image_to_image_translation/results/losses.png')
-plt.close()
+plt.close()"""
 # plt.show()
 # -
 
