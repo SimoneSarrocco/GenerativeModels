@@ -153,8 +153,8 @@ test_images = torch.stack(test_images, 0)
 
 val_images = torch.cat((val_images, test_images), dim=0)
 
-train_data = OCTDataset(train_images)
-train_loader = DataLoader(train_data, batch_size=1, shuffle=False, num_workers=0)
+train_data = OCTDataset(train_images, transform=True)
+train_loader = DataLoader(train_data, batch_size=1, shuffle=True, num_workers=64)
 print(f'Shape of training set: {train_images.shape}')
 # train_datalist = [{"image": train[i, -1:, ...]} for i in range(len(train))]
 
@@ -169,7 +169,7 @@ print(f'Shape of training set: {train_images.shape}')
 # %%
 val_data = OCTDataset(val_images)
 # val_datalist = [{"image": val[i, -1:, ...]} for i in range(len(val))]
-val_loader = DataLoader(val_data, batch_size=1, shuffle=False, num_workers=0)
+val_loader = DataLoader(val_data, batch_size=1, shuffle=False, num_workers=64)
 print(f'Shape of validation set: {val_images.shape}')
 
 # %% [markdown]
@@ -191,12 +191,12 @@ model = VQVAE(
     spatial_dims=2,
     in_channels=1,
     out_channels=1,
-    num_channels=(128, 256, 512),
-    num_res_channels=(128, 256, 512),
+    num_channels=(256, 512),
+    num_res_channels=512,
     num_res_layers=2,
-    downsample_parameters=((2, 4, 1, 1), (2, 4, 1, 1), (2, 4, 1, 1)),
-    upsample_parameters=((2, 4, 1, 1, 0), (2, 4, 1, 1, 0), (2, 4, 1, 1, 0)),
-    num_embeddings=16384,  # this is "k"
+    downsample_parameters=((2, 4, 1, 1), (2, 4, 1, 1)),
+    upsample_parameters=((2, 4, 1, 1, 0), (2, 4, 1, 1, 0)),
+    num_embeddings=512,  # this is "k"
     embedding_dim=4,  # this is "d"
 )
 model.to(device)
@@ -216,10 +216,10 @@ adv_loss = PatchAdversarialLoss(criterion="least_squares")
 adv_weight = 0.01
 perceptual_weight = 0.001
 
-tensorboard_dir = '/home/simone.sarrocco/thesis/project/models/diffusion_model/GenerativeModels/tutorials/generative/2d_vqgan/reconstruction_new/tensorboard_log'
+tensorboard_dir = '/home/simone.sarrocco/thesis/project/models/diffusion_model/GenerativeModels/tutorials/generative/2d_vqgan/reconstruction_new_embed_dim_4_shorter_architecture/tensorboard_log'
 writer = SummaryWriter(log_dir=tensorboard_dir)
 # Define the directory to save checkpoints
-checkpoint_dir = "/home/simone.sarrocco/thesis/project/models/diffusion_model/GenerativeModels/tutorials/generative/2d_vqgan/reconstruction_new/checkpoints"
+checkpoint_dir = "/home/simone.sarrocco/thesis/project/models/diffusion_model/GenerativeModels/tutorials/generative/2d_vqgan/reconstruction_new_embed_dim_4_shorter_architecture/checkpoints"
 os.makedirs(checkpoint_dir, exist_ok=True)
 
 # %% [markdown]
