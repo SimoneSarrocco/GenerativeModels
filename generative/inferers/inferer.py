@@ -224,7 +224,8 @@ class DiffusionInferer(Inferer):
                 pred_original_sample = (alpha_prod_t**0.5) * noisy_image - (beta_prod_t**0.5) * model_output
             # 3. Clip "predicted x_0"
             if scheduler.clip_sample:
-                pred_original_sample = torch.clamp(pred_original_sample, -1, 1)
+                # pred_original_sample = torch.clamp(pred_original_sample, -1, 1)
+                pred_original_sample = torch.clamp(pred_original_sample, 0, 1)
 
             # 4. Compute coefficients for pred_original_sample x_0 and current sample x_t
             # See formula (7) from https://arxiv.org/pdf/2006.11239.pdf

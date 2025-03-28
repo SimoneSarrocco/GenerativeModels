@@ -164,8 +164,8 @@ model = DiffusionModelUNet(
 )
 model.to(device)
 
-scheduler = DDPMScheduler(num_train_timesteps=1000)
-optimizer = torch.optim.Adam(params=model.parameters(), lr=2.5e-5)
+scheduler = DDPMScheduler(num_train_timesteps=1000, clip_sample_min=0, clip_sample_max=1)
+optimizer = torch.optim.Adam(params=model.parameters(), lr=2e-5)
 inferer = DiffusionInferer(scheduler)
 
 #
