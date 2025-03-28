@@ -74,7 +74,7 @@ def save_checkpoint(model, epoch, save_dir="checkpoints"):
         "epoch": epoch,  # Save the current epoch for reference
     }
 
-    checkpoint_path = os.path.join(save_dir, f"vqgan_epoch_{epoch}.ckpt")
+    checkpoint_path = os.path.join(save_dir, f"vqvae_epoch_{epoch}.ckpt")
     torch.save(checkpoint, checkpoint_path)
     print(f"Checkpoint saved: {checkpoint_path}")
 
