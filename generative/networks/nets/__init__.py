@@ -19,4 +19,4 @@ from .spade_autoencoderkl import SPADEAutoencoderKL
 from .spade_diffusion_model_unet import SPADEDiffusionModelUNet
 from .spade_network import SPADENet
 from .transformer import DecoderOnlyTransformer
-from .vqvae_2 import VQVAE
+from .vqvae import VQVAE
