@@ -197,7 +197,7 @@ model = VQVAE(
     downsample_parameters=((2, 4, 1, 1), (2, 4, 1, 1), (2, 4, 1, 1)),
     upsample_parameters=((2, 4, 1, 1, 0), (2, 4, 1, 1, 0), (2, 4, 1, 1, 0)),
     num_embeddings=16384,  # this is "k"
-    embedding_dim=8,  # this is "d"
+    embedding_dim=32,  # this is "d"
 )
 model.to(device)
 
@@ -216,7 +216,7 @@ adv_loss = PatchAdversarialLoss(criterion="least_squares")
 adv_weight = 0.01
 perceptual_weight = 0.001
 
-run_name = 'vqgan-3layers-embeddim-8-num-embed-16384'
+run_name = 'vqgan-3layers-embeddim-32-num-embed-16384'
 
 tensorboard_dir = f'/home/simone.sarrocco/thesis/project/models/diffusion_model/GenerativeModels/tutorials/generative/2d_vqgan/{run_name}/tensorboard_log'
 writer = SummaryWriter(log_dir=tensorboard_dir)
