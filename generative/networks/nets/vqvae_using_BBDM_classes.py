@@ -812,7 +812,9 @@ class VQVAE(nn.Module):
         if self.use_checkpointing:
             return torch.utils.checkpoint.checkpoint(self.encoder, images, use_reentrant=False)
         else:
-            return self.encoder(images)
+            enc = self.encoder(images)
+            encodings = self.quant_conv(enc)
+            return encodings
 
     def quantize(self, encodings: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         # x_loss, x = self.quantizer(encodings)
@@ -841,12 +843,12 @@ class VQVAE(nn.Module):
 
     def encode_stage_2_inputs(self, x: torch.Tensor, quantized: bool = True) -> torch.Tensor:
         z = self.encode(x)
-        e, _ = self.quantize(z)
+        e, _, _ = self.quantize(z)
         if quantized:
             return e
         return z
 
     def decode_stage_2_outputs(self, z: torch.Tensor) -> torch.Tensor:
-        e, _ = self.quantize(z)
+        e, _, _ = self.quantize(z)
         image = self.decode(e)
         return image
