@@ -87,7 +87,9 @@ class VQModel(torch.nn.Module):
             self.monitor = monitor
 
     def init_from_ckpt(self, path, ignore_keys=list()):
-        sd = torch.load(path, map_location="cpu")["state_dict"]
+        # sd = torch.load(path, map_location="cpu")["state_dict"]
+        checkpoint = torch.load(path, map_location="cpu")
+        sd = checkpoint["model_state_dict"]
         keys = list(sd.keys())
         for k in keys:
             for ik in ignore_keys:
@@ -345,7 +347,7 @@ def parse_args_and_config():
     parser.add_argument("--config", type=str, required=True, help="Path to config file")
     parser.add_argument("--output_dir", type=str, default="./outputs", help="Output directory")
     parser.add_argument("--device", type=str, default="cuda", help="Device to train on")
-    parser.add_argument("--num_epochs", type=int, default=1000, help="Number of epochs to train")
+    parser.add_argument("--num_epochs", type=int, default=500, help="Number of epochs to train")
     parser.add_argument("--batch_size", type=int, default=1, help="Batch size for training")
     parser.add_argument("--save_interval", type=int, default=50, help="Interval for saving checkpoints")
     parser.add_argument("--sample_interval", type=int, default=10, help="Interval for sampling and computing metrics")
