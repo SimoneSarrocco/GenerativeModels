@@ -154,7 +154,7 @@ test_images = torch.stack(test_images, 0)
 val_images = torch.cat((val_images, test_images), dim=0)
 
 train_data = OCTDataset(train_images, transform=True)
-train_loader = DataLoader(train_data, batch_size=1, shuffle=True, num_workers=64)
+train_loader = DataLoader(train_data, batch_size=8, shuffle=True, num_workers=64)
 print(f'Shape of training set: {train_images.shape}')
 # train_datalist = [{"image": train[i, -1:, ...]} for i in range(len(train))]
 
@@ -169,7 +169,7 @@ print(f'Shape of training set: {train_images.shape}')
 # %%
 val_data = OCTDataset(val_images)
 # val_datalist = [{"image": val[i, -1:, ...]} for i in range(len(val))]
-val_loader = DataLoader(val_data, batch_size=1, shuffle=False, num_workers=64)
+val_loader = DataLoader(val_data, batch_size=8, shuffle=False, num_workers=64)
 print(f'Shape of validation set: {val_images.shape}')
 
 # %% [markdown]
@@ -191,13 +191,13 @@ model = VQVAE(
     spatial_dims=2,
     in_channels=1,
     out_channels=1,
-    num_channels=(128, 256, 512),
-    num_res_channels=256,
+    num_channels=(256, 512),
+    num_res_channels=512,
     num_res_layers=2,
-    downsample_parameters=((2, 4, 1, 1), (2, 4, 1, 1), (2, 4, 1, 1)),
-    upsample_parameters=((2, 4, 1, 1, 0), (2, 4, 1, 1, 0), (2, 4, 1, 1, 0)),
-    num_embeddings=16384,  # this is "k"
-    embedding_dim=32,  # this is "d"
+    downsample_parameters=((2, 4, 1, 1), (2, 4, 1, 1)),
+    upsample_parameters=((2, 4, 1, 1, 0), (2, 4, 1, 1, 0)),
+    num_embeddings=1024,  # this is "k"
+    embedding_dim=4,  # this is "d"
 )
 model.to(device)
 
@@ -216,7 +216,7 @@ adv_loss = PatchAdversarialLoss(criterion="least_squares")
 adv_weight = 0.01
 perceptual_weight = 0.001
 
-run_name = 'vqgan-3layers-embeddim-32-num-embed-16384'
+run_name = 'vqgan-2layers-embeddim-4-num-embed-1024'
 
 tensorboard_dir = f'/home/simone.sarrocco/thesis/project/models/diffusion_model/GenerativeModels/tutorials/generative/2d_vqgan/{run_name}/tensorboard_log'
 writer = SummaryWriter(log_dir=tensorboard_dir)
@@ -251,7 +251,7 @@ for epoch in range(n_epochs):
     epoch_loss = 0
     gen_epoch_loss = 0
     disc_epoch_loss = 0
-    mse_batches, psnr_batches, ssim_batches, perceptual_batches = [], [], [], []
+    mse_batches, psnr_batches, ssim_batches = [], [], []
     progress_bar = tqdm(enumerate(train_loader), total=len(train_loader), ncols=110)
     progress_bar.set_description(f"Epoch {epoch}")
     for step, batch in progress_bar:
@@ -389,12 +389,12 @@ for epoch in range(n_epochs):
                 # ssim_batch = SSIM._compute_metric(reconstruction[:, :, 8:-8, :], images[:, :, 8:-8, :])
                 ssim_batch = SSIM._compute_metric(reconstruction[:, :, 8:-8, :], images[:, :, 8:-8, :])
                 # perceptual_batch = perceptual_loss(reconstruction[:, :, 8:-8, :].float(), images[:, :, 8:-8, :].float())
-                perceptual_batch = perceptual_loss(reconstruction[:, :, 8:-8, :].float(), images[:, :, 8:-8, :].float())
+                # perceptual_batch = perceptual_loss(reconstruction[:, :, 8:-8, :].float(), images[:, :, 8:-8, :].float())
 
                 mse_batches.append(mse_batch.mean().cpu())
                 psnr_batches.append(psnr_batch.cpu())
                 ssim_batches.append(ssim_batch.cpu())
-                perceptual_batches.append(perceptual_batch.cpu())
+                # perceptual_batches.append(perceptual_batch.cpu())
 
                 # output_3_channels = reconstruction[:, :, 8:-8, :].repeat(1, 3, 1, 1)  # (Batch, Channels, Height, Width)
                 # target_3_channels = images[:, :, 8:-8, :].repeat(1, 3, 1, 1)  # (Batch, Channels, Height, Width)
@@ -408,28 +408,28 @@ for epoch in range(n_epochs):
         psnr_batches = np.asarray(psnr_batches, dtype=np.float32)
         ssim_batches = np.asarray(ssim_batches, dtype=np.float32)
         mse_batches = np.asarray(mse_batches, dtype=np.float32)
-        perceptual_batches = np.asarray(perceptual_batches, dtype=np.float32)
+        # perceptual_batches = np.asarray(perceptual_batches, dtype=np.float32)
 
         # Calculate averages
         avg_psnr, std_psnr = np.mean(psnr_batches), np.std(psnr_batches)
         avg_ssim, std_ssim = np.mean(ssim_batches), np.std(ssim_batches)
         avg_mse, std_mse = np.mean(mse_batches), np.std(mse_batches)
-        avg_perceptual, std_perceptual = np.mean(perceptual_batches), np.std(perceptual_batches)
+        # avg_perceptual, std_perceptual = np.mean(perceptual_batches), np.std(perceptual_batches)
 
         # Log average metrics to TensorBoard
         metrics_summary = {
             "PSNR": avg_psnr,
             "SSIM": avg_ssim,
             "MSE": avg_mse,
-            "PERC_LOSS": avg_perceptual,
+            # "PERC_LOSS": avg_perceptual,
         }
 
         for metric_name, value in metrics_summary.items():
             writer.add_scalar(f"Validation_metrics/{metric_name}", value.item(), epoch + 1)
         print(
-            f"Validation metrics, epoch {epoch + 1}: PSNR: {avg_psnr.item():.5f} ± {std_psnr.item():.5f} | SSIM: {avg_ssim.item():.5f} ± {std_ssim.item():.5f} | MSE: {avg_mse.item():.5f} ± {std_mse.item():.5f} | PERC_LOSS: {avg_perceptual.item():.5f} ± {std_perceptual.item():.5f}")
+            f"Validation metrics, epoch {epoch + 1}: PSNR: {avg_psnr.item():.5f} ± {std_psnr.item():.5f} | SSIM: {avg_ssim.item():.5f} ± {std_ssim.item():.5f} | MSE: {avg_mse.item():.5f} ± {std_mse.item():.5f}")
 
-    # Save model checkpoint every 50 epochs
+    # Save model checkpoint every 10 epochs
     if (epoch + 1) % 10 == 0:
         save_checkpoint(model, epoch + 1, save_dir=checkpoint_dir)
 
