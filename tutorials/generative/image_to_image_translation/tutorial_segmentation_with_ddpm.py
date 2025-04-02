@@ -83,6 +83,90 @@ def mean_flat(tensor):
     """
     return tensor.mean(dim=list(range(1, len(tensor.shape))))
 
+
+def resume_training(model, optimizer, scheduler, checkpoint_path, start_epoch=0):
+    """
+    Resume training from a checkpoint.
+
+    Args:
+        model: The DiffusionModelUNet model
+        optimizer: The optimizer (Adam)
+        scheduler: The DDPMScheduler
+        checkpoint_path: Path to the checkpoint file
+        start_epoch: The epoch to resume from (default: 0, determined from checkpoint filename if possible)
+
+    Returns:
+        model: The loaded model
+        optimizer: The loaded optimizer if optimizer state was saved
+        start_epoch: The epoch to resume from
+    """
+    print(f"Loading checkpoint from {checkpoint_path}")
+
+    # Extract epoch number from filename if not provided
+    if start_epoch == 0 and "epoch" not in checkpoint_path:
+        try:
+            # Try to extract epoch number from filename (e.g., ddpm_oct_model_50.pt → 50)
+            filename = os.path.basename(checkpoint_path)
+            epoch_str = filename.split('_')[-1].split('.')[0]
+            if epoch_str.isdigit():
+                start_epoch = int(epoch_str)
+            print(f"Extracted start epoch: {start_epoch}")
+        except:
+            print("Could not extract epoch number from filename. Starting from provided start_epoch.")
+
+    # Load the state dict
+    checkpoint = torch.load(checkpoint_path)
+
+    # If checkpoint is just the model state dict
+    if isinstance(checkpoint, dict) and all(k.startswith("module.") or "." in k for k in checkpoint.keys()):
+        model.load_state_dict(checkpoint)
+        print("Loaded model weights only.")
+        return model, optimizer, start_epoch
+
+    # If checkpoint contains more info (full training state)
+    if isinstance(checkpoint, dict) and "model_state_dict" in checkpoint:
+        model.load_state_dict(checkpoint["model_state_dict"])
+        if "optimizer_state_dict" in checkpoint and optimizer is not None:
+            optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+        if "epoch" in checkpoint:
+            start_epoch = checkpoint["epoch"] + 1  # +1 because we want to start from the next epoch
+        if "scheduler_state" in checkpoint and scheduler is not None:
+            scheduler.load_state_dict(checkpoint["scheduler_state"])
+        print(f"Loaded complete training state. Resuming from epoch {start_epoch}")
+        return model, optimizer, start_epoch
+
+    print("Loaded model weights. Optimizer and scheduler states not found.")
+    return model, optimizer, start_epoch
+
+
+def save_checkpoint(model, optimizer, scheduler, epoch, checkpoint_dir, is_final=False):
+    """
+    Save a checkpoint with full training state.
+
+    Args:
+        model: The model to save
+        optimizer: The optimizer to save
+        scheduler: The noise scheduler
+        epoch: Current epoch number
+        checkpoint_dir: Directory to save the checkpoint
+        is_final: Whether this is the final checkpoint of training
+    """
+    checkpoint = {
+        "epoch": epoch,
+        "model_state_dict": model.state_dict(),
+        "optimizer_state_dict": optimizer.state_dict(),
+        "scheduler_state": scheduler.get_state() if hasattr(scheduler, "get_state") else None,
+    }
+
+    if is_final:
+        checkpoint_path = f"{checkpoint_dir}/ddpm_oct_model_final.pt"
+    else:
+        checkpoint_path = f"{checkpoint_dir}/ddpm_oct_model_epoch_{epoch}.pt"
+
+    torch.save(checkpoint, checkpoint_path)
+    print(f"Saved checkpoint at epoch {epoch} to {checkpoint_path}")
+
+
 torch.multiprocessing.set_sharing_strategy("file_system")
 print_config()
 # -
@@ -134,7 +218,7 @@ val_loader = DataLoader(val_data, batch_size=1, shuffle=False, num_workers=64)
 print(f'Shape of validation set: {val.shape}')
 
 
-run_number = '1st_run'
+run_number = '4th_run'
 #
 # ## Define network, scheduler, optimizer, and inferer
 #
@@ -149,8 +233,11 @@ os.makedirs(checkpoint_dir, exist_ok=True)
 PSNR = PeakSignalNoiseRatio().to(device)
 # SSIM = StructuralSimilarityIndexMeasure().to(device)
 SSIM = SSIMMetric(spatial_dims=2)
-PERC = PerceptualLoss(spatial_dims=2, device=device)
+# PERC = PerceptualLoss(spatial_dims=2, device=device)
 # LPIPS = LearnedPerceptualImagePatchSimilarity(net_type='vgg', normalize=True).to(device)
+
+resume_training_flag = True  # Set to True to resume training, False to start from scratch
+checkpoint_path = "/home/simone.sarrocco/thesis/project/models/diffusion_model/GenerativeModels/tutorials/generative/image_to_image_translation/checkpoints/4th_run/ddpm_oct_model_601.pt"
 
 model = DiffusionModelUNet(
     spatial_dims=2,
@@ -174,7 +261,7 @@ inferer = DiffusionInferer(scheduler)
 # In every step, we concatenate the original MR image to the noisy segmentation mask, to predict a slightly denoised segmentation mask.\
 # This is described in Equation 7 of the paper https://arxiv.org/pdf/2112.03145.pdf.
 
-n_epochs = 4000
+n_epochs = 2000
 val_interval = 1
 epoch_loss_list = []
 val_epoch_loss_list = []
@@ -187,6 +274,26 @@ os.makedirs(validation_samples_path, exist_ok=True)
 scaler = GradScaler('cuda')
 total_start = time.time()
 i = 0
+
+# Resume from checkpoint if flag is set
+if resume_training_flag and os.path.exists(checkpoint_path):
+    model, optimizer, start_epoch = resume_training(model, optimizer, scheduler, checkpoint_path)
+
+    # Load the loss history if available (optional)
+    loss_history_path = os.path.join(os.path.dirname(checkpoint_path), "loss_history.npz")
+    if os.path.exists(loss_history_path):
+        history = np.load(loss_history_path)
+        epoch_loss_list = history["train_loss"].tolist()
+        if "val_loss" in history:
+            val_epoch_loss_list = history["val_loss"].tolist()
+        print(f"Loaded loss history with {len(epoch_loss_list)} entries")
+
+    # Calculate global step for tensorboard
+    i = start_epoch * len(train_loader)
+    print(f"Resuming training from epoch {start_epoch} (global step {i})")
+else:
+    print("Starting training from scratch")
+
 for epoch in range(n_epochs):
     model.train()
     epoch_loss = 0
@@ -243,7 +350,7 @@ for epoch in range(n_epochs):
 
     if (epoch+1) % val_sample == 0:
         model.eval()
-        mse_batches, psnr_batches, ssim_batches, perceptual_batches = [], [], [], []
+        mse_batches, psnr_batches, ssim_batches = [], [], []
         for step, (art10, pseudoart100) in enumerate(val_loader):
             if step == 0:
                 art10 = art10.to(device)
@@ -288,41 +395,50 @@ for epoch in range(n_epochs):
                     mse_batch = mean_flat((current_img[:, :, 8:-8, :] - pseudoart100[:, :, 8:-8, :]) ** 2)
                     psnr_batch = PSNR(current_img[:, :, 8:-8, :], pseudoart100[:, :, 8:-8, :])
                     ssim_batch = SSIM._compute_metric(current_img[:, :, 8:-8, :], pseudoart100[:, :, 8:-8, :])
-                    perceptual_batch = PERC(current_img[:, :, 8:-8, :], pseudoart100[:, :, 8:-8, :])
+                    # perceptual_batch = PERC(current_img[:, :, 8:-8, :], pseudoart100[:, :, 8:-8, :])
 
                     mse_batches.append(mse_batch.mean().cpu())
                     psnr_batches.append(psnr_batch.cpu())
                     ssim_batches.append(ssim_batch.cpu())
-                    perceptual_batches.append(perceptual_batch.cpu())
+                    # perceptual_batches.append(perceptual_batch.cpu())
 
         psnr_batches = np.asarray(psnr_batches, dtype=np.float32)
         ssim_batches = np.asarray(ssim_batches, dtype=np.float32)
         mse_batches = np.asarray(mse_batches, dtype=np.float32)
-        perceptual_batches = np.asarray(perceptual_batches, dtype=np.float32)
+        # perceptual_batches = np.asarray(perceptual_batches, dtype=np.float32)
 
         # Calculate averages
         avg_psnr, std_psnr = np.mean(psnr_batches), np.std(psnr_batches)
         avg_ssim, std_ssim = np.mean(ssim_batches), np.std(ssim_batches)
         avg_mse, std_mse = np.mean(mse_batches), np.std(mse_batches)
-        avg_perceptual, std_perceptual = np.mean(perceptual_batches), np.std(perceptual_batches)
+        # avg_perceptual, std_perceptual = np.mean(perceptual_batches), np.std(perceptual_batches)
 
         # Log average metrics to TensorBoard
         metrics_summary = {
             "PSNR": avg_psnr,
             "SSIM": avg_ssim,
             "MSE": avg_mse,
-            "PERC_LOSS": avg_perceptual,
+            # "PERC_LOSS": avg_perceptual,
         }
 
         for metric_name, value in metrics_summary.items():
             writer.add_scalar(f"Validation_metrics/{metric_name}", value.item(), epoch + 1)
         print(
-            f"Validation metrics, epoch {epoch + 1}: PSNR: {avg_psnr.item():.5f} ± {std_psnr.item():.5f} | SSIM: {avg_ssim.item():.5f} ± {std_ssim.item():.5f} | MSE: {avg_mse.item():.5f} ± {std_mse.item():.5f} | PERC_LOSS: {avg_perceptual.item():.5f} ± {std_perceptual.item():.5f}")
+            f"Validation metrics, epoch {epoch + 1}: PSNR: {avg_psnr.item():.5f} ± {std_psnr.item():.5f} | SSIM: {avg_ssim.item():.5f} ± {std_ssim.item():.5f} | MSE: {avg_mse.item():.5f} ± {std_mse.item():.5f}")
 
-    if epoch % save_interval == 0:
-        torch.save(model.state_dict(), f"{checkpoint_dir}/ddpm_oct_model_{epoch+1}.pt")
+    # Save checkpoint at regular intervals
+    if (epoch + 1) % save_interval == 0:
+        save_checkpoint(model, optimizer, scheduler, epoch, checkpoint_dir)
 
-torch.save(model.state_dict(), f"{checkpoint_dir}/ddpm_oct_model_last_epoch.pt")
+        # Optionally save loss history
+        np.savez(
+            f"{checkpoint_dir}/loss_history.npz",
+            train_loss=np.array(epoch_loss_list),
+            val_loss=np.array(val_epoch_loss_list) if val_epoch_loss_list else np.array([]),
+        )
+
+# torch.save(model.state_dict(), f"{checkpoint_dir}/ddpm_oct_model_last_epoch.pt")
+save_checkpoint(model, optimizer, scheduler, n_epochs - 1, checkpoint_dir, is_final=True)
 total_time = time.time() - total_start
 print(f"train diffusion completed, total time: {total_time}.")
 plt.style.use("seaborn-bright")
