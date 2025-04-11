@@ -1,64 +1,3 @@
-# ---
-# jupyter:
-#   jupytext:
-#     formats: ipynb,py:percent
-#     text_representation:
-#       extension: .py
-#       format_name: percent
-#       format_version: '1.3'
-#       jupytext_version: 1.14.4
-#   kernelspec:
-#     display_name: Python 3 (ipykernel)
-#     language: python
-#     name: python3
-# ---
-
-# %%
-# Copyright (c) MONAI Consortium
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#     http://www.apache.org/licenses/LICENSE-2.0
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-
-# %% [markdown]
-# # Vector Quantized Generative Adversarial Networks with MedNIST Dataset
-#
-# This tutorial illustrates how to use MONAI for training a Vector Quantized Generative Adversarial Network (VQGAN) on 2D images.
-#
-#
-# ## Setup environment
-
-# %%
-# !python -c "import monai" || pip install -q "monai-weekly[tqdm]"
-# !python -c "import matplotlib" || pip install -q matplotlib
-# %matplotlib inline
-
-# %% [markdown]
-# ## Setup imports
-
-class EarlyStopper:
-    def __init__(self, patience=1, min_delta=0.):
-        self.patience = patience
-        self.min_delta = min_delta
-        self.counter = 0
-        self.min_validation_loss = float('inf')
-
-    def early_stop(self, validation_loss):
-        if validation_loss < self.min_validation_loss:
-            self.min_validation_loss = validation_loss
-            self.counter = 0
-        elif validation_loss > (self.min_validation_loss + self.min_delta):
-            self.counter += 1
-            if self.counter >= self.patience:
-                return True
-        return False
-
-# %%
 import os
 import sys
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
@@ -81,10 +20,93 @@ from generative.networks.nets import VQVAE, PatchDiscriminator
 from generative.metrics.ssim import SSIMMetric
 from dataset import OCTDataset
 from torch.utils.tensorboard import SummaryWriter
-from torchmetrics.image.lpip import LearnedPerceptualImagePatchSimilarity
-from torchmetrics.image import PeakSignalNoiseRatio, StructuralSimilarityIndexMeasure
+from torchmetrics.image import PeakSignalNoiseRatio
+from PIL import Image
+import cv2
 import argparse
+from torchvision.utils import make_grid
 print_config()
+
+
+class EarlyStopper:
+    def __init__(self, patience=1, min_delta=0.):
+        self.patience = patience
+        self.min_delta = min_delta
+        self.counter = 0
+        self.min_validation_loss = float('inf')
+
+    def early_stop(self, validation_loss):
+        if validation_loss < self.min_validation_loss:
+            self.min_validation_loss = validation_loss
+            self.counter = 0
+        elif validation_loss > (self.min_validation_loss + self.min_delta):
+            self.counter += 1
+            if self.counter >= self.patience:
+                return True
+        return False
+
+
+def create_grid(output_images, input_images, target_images):
+    assert output_images.shape == input_images.shape == target_images.shape
+    # Stack horizontally: [input | target | output]
+    images = torch.stack([input_images, target_images, output_images], dim=0)
+    grid = make_grid(images, nrow=3, normalize=False, value_range=None, padding=0)
+    # writer.add_image(f'{tag_prefix}/sample_{b}', grid, iteration)
+    return grid
+
+
+def save_difference_maps_diffusion_paper(input_image, target_image, output_image, epoch, batch, histogram, writer, phase, folder):
+    assert target_image.shape == output_image.shape == input_image.shape
+    os.makedirs(os.path.join(folder, 'Difference_Maps'), exist_ok=True)
+    os.makedirs(os.path.join(folder, 'Histograms'), exist_ok=True)
+    for i in range(target_image.shape[0]):
+        # for each image in the batch
+        # we remove the channel dimension and transform them to ndarray
+        target = np.asarray(target_image[i, 0, ...], dtype=np.float32)
+        output = np.asarray(output_image[i, 0, ...], dtype=np.float32)
+        input = np.asarray(input_image[i, 0, ...], dtype=np.float32)
+
+        # Compute the Difference Map
+        difference_map = output - target
+
+        vmin = -1
+        vmax = 1
+        fig = plt.figure()
+        plt.imshow(difference_map, cmap='seismic', vmin=vmin, vmax=vmax)
+        plt.colorbar()
+        plt.title('Difference Map (Output-Target)')
+        # plt.tight_layout()
+        # Convert the Matplotlib figure to a NumPy array
+        # plt_image = _plot_to_image(fig)
+        # Add it to tensorboard
+        # writer.add_image(f'{phase}_Difference_Maps/Sample_{batch}_{i+1}', plt_image, epoch)
+        plt.savefig(f'{folder}/Difference_Maps/Sample_{batch}_{i + 1}.png')
+        plt.close(fig)
+
+        if histogram:
+            # Compute the histograms of the pixel intensity distribution of target and model output
+            hist_ground_truth = cv2.calcHist([target*255], [0], None, [256], [0, 256])
+            hist_output = cv2.calcHist([output*255], [0], None, [256], [0, 256])
+            hist_input = cv2.calcHist([input*255], [0], None, [256], [0, 256])
+
+            hist_ground_truth /= hist_ground_truth.sum()
+            hist_output /= hist_output.sum()
+            hist_input /= hist_input.sum()
+
+            fig = plt.figure(figsize=(10, 6))
+            plt.plot(hist_ground_truth, color='blue', label='Ground Truth')
+            plt.plot(hist_output, color='red', label='Output')
+            plt.plot(hist_input, color='green', label='Input')
+            plt.xlabel('Pixel Intensity')
+            plt.ylabel('Normalized Frequency')
+            plt.legend()
+            plt.tight_layout()
+
+            # plt_image = _plot_to_image(fig)
+            # Add the figure on tensorboard
+            # writer.add_image(f'{phase}_Histograms/Sample_{batch}_{i+1}', plt_image, epoch)
+            plt.savefig(f'{folder}/Histograms/Sample_{batch}_{i + 1}.png')
+            plt.close(fig)
 
 
 def parse_args_and_config():
@@ -92,7 +114,7 @@ def parse_args_and_config():
     parser.add_argument("--num_embeddings", type=int, required=True, help="Number of embedding vectors")
     parser.add_argument("--embedding_dimension", type=int, required=True, help="Embedding dimension of each vector")
     parser.add_argument("--pixel_range", type=int, default=0, help="Pixel range of each image, 0 means [0,1], -1 means [-1,1]")
-    parser.add_argument("--iteration", type=int, default=0, help="Number of current epoch from which to sample")
+    # parser.add_argument("--iteration", type=int, default=0, help="Number of current epoch from which to sample")
     parser.add_argument("--model_name", type=str, default='', help="Name of the model configuration")
 
     args = parser.parse_args()
@@ -127,31 +149,13 @@ def mean_flat(tensor):
     """
     return tensor.mean(dim=list(range(1, len(tensor.shape))))
 
-# %% [markdown]
-# ## Setup data directory
-#
-# You can specify a directory with the MONAI_DATA_DIRECTORY environment variable.
-#
-# This allows you to save results and reuse downloads.
-#
-# If not specified a temporary directory will be used.
 
 # %%
 directory = os.environ.get("MONAI_DATA_DIRECTORY")
 root_dir = tempfile.mkdtemp() if directory is None else directory
 print(root_dir)
 
-# %% [markdown]
-# ## Set deterministic training for reproducibility
-
-# %%
 set_determinism(1927)
-
-# %% [markdown]
-# ## Setup MedNIST Dataset and training and validation dataloaders
-# In this tutorial, we will train our models on the MedNIST dataset available on MONAI
-# (https://docs.monai.io/en/stable/apps.html#monai.apps.MedNISTDataset). In order to train faster, we will select just
-# one of the available classes ("HeadCT").
 
 args = parse_args_and_config()
 
@@ -159,43 +163,26 @@ train = np.load('/home/simone.sarrocco/thesis/project/data/train_set_patient_spl
 val = np.load('/home/simone.sarrocco/thesis/project/data/val_set_patient_split.npz')['images']
 test = np.load('/home/simone.sarrocco/thesis/project/data/test_set_patient_split.npz')['images']
 
-train_images = []
-val_images = []
-test_images = []
+# CURRENT SPLIT: 75% TRAIN (990 pairs), 12% VALIDATION (160 pairs), 13% TEST (170 pairs)
+train_dataset = OCTDataset(train, resize=args.resize, pixel_range=args.pixel_range, clip=args.clip,
+                           gaussian_noise=args.gaussian_noise, blur=args.blur, transform=args.transform)
+train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True)
+val_dataset = OCTDataset(val, resize=args.resize, pixel_range=args.pixel_range, clip=args.clip,
+                         gaussian_noise=args.gaussian_noise, blur=args.blur, transform=False)
+val_loader = DataLoader(val_dataset, batch_size=args.batch_size, shuffle=False)
 
-for i in range(len(train)):
-    art10 = torch.tensor(train[i, :1, ...])
-    pseudoart100 = torch.tensor(train[i, -1:, ...])
-    train_images.append(art10)
-    train_images.append(pseudoart100)
-train_images = torch.stack(train_images, 0)
+test_dataset = OCTDataset(test, resize=args.resize, pixel_range=args.pixel_range, clip=args.clip,
+                         gaussian_noise=args.gaussian_noise, blur=args.blur, transform=False)
+test_loader = DataLoader(test_dataset, batch_size=args.batch_size, shuffle=False)
 
-for i in range(len(val)):
-    art10 = torch.tensor(val[i, :1, ...])
-    pseudoart100 = torch.tensor(val[i, -1:, ...])
-    val_images.append(art10)
-    val_images.append(pseudoart100)
-val_images = torch.stack(val_images, 0)
+print('Len train_dataset:', len(train_dataset))
+print('Len train_dataloader:', len(train_loader))
 
-for i in range(len(test)):
-    art10 = torch.tensor(test[i, :1, ...])
-    pseudoart100 = torch.tensor(test[i, -1:, ...])
-    test_images.append(art10)
-    test_images.append(pseudoart100)
-test_images = torch.stack(test_images, 0)
+print('Len val_dataset:', len(val_dataset))
+print('Len val_dataloader:', len(val_loader))
 
-val_images = torch.cat((val_images, test_images), dim=0)
-
-train_data = OCTDataset(train_images, transform=True, pixel_range=args.pixel_range)
-train_loader = DataLoader(train_data, batch_size=1, shuffle=True, num_workers=64)
-print(f'Shape of training set: {train_images.shape}')
-# train_datalist = [{"image": train[i, -1:, ...]} for i in range(len(train))]
-
-# %%
-val_data = OCTDataset(val_images)
-# val_datalist = [{"image": val[i, -1:, ...]} for i in range(len(val))]
-val_loader = DataLoader(val_data, batch_size=1, shuffle=False, num_workers=64)
-print(f'Shape of validation set: {val_images.shape}')
+print('Len test_dataset:', len(test_dataset))
+print('Len test_dataloader:', len(test_loader))
 
 
 # %%
@@ -214,8 +201,7 @@ model = VQVAE(
 )
 model.to(device)
 
-
-discriminator = PatchDiscriminator(spatial_dims=2, in_channels=1, num_layers_d=3, num_channels=64)
+discriminator = PatchDiscriminator(spatial_dims=2, in_channels=2, num_layers_d=3, num_channels=64)
 discriminator.to(device)
 
 perceptual_loss = PerceptualLoss(spatial_dims=2, network_type="alex", device='cuda')
@@ -238,11 +224,6 @@ writer = SummaryWriter(log_dir=tensorboard_dir)
 checkpoint_dir = f"/home/simone.sarrocco/thesis/project/models/diffusion_model/GenerativeModels/tutorials/generative/2d_vqgan/{args.model_name}/checkpoints"
 os.makedirs(checkpoint_dir, exist_ok=True)
 
-# %% [markdown]
-# ### Model training
-# Here, we are training our model for 100 epochs (training time: ~50 minutes).
-
-# %%
 n_epochs = 100
 val_interval = 1
 epoch_recon_loss_list = []
@@ -271,18 +252,22 @@ for epoch in range(n_epochs):
     progress_bar = tqdm(enumerate(train_loader), total=len(train_loader), ncols=110)
     progress_bar.set_description(f"Epoch {epoch}")
     # Training loop
-    for step, batch in progress_bar:
-        images = batch.to(device)
+    for step, (input_image, target_image) in progress_bar:
+        art10 = input_image.to(device)
+        pseudoart100 = target_image.to(device)
+
         optimizer_g.zero_grad(set_to_none=True)
 
         # Generator part
-        reconstruction, quantization_loss = model(images=images)
+        reconstruction, quantization_loss = model(images=art10)
 
         i += 1
-        logits_fake = discriminator(reconstruction.contiguous().float())[-1]
+        concatenation_input_recon = torch.cat((art10, reconstruction), dim=1)
+        # logits_fake = discriminator(reconstruction.contiguous().float())[-1]
+        logits_fake = discriminator(concatenation_input_recon.contiguous().float())[-1]
 
-        recons_loss = l1_loss(reconstruction.float(), images.float())
-        p_loss = perceptual_loss(reconstruction.float(), images.float())
+        recons_loss = l1_loss(reconstruction.float(), pseudoart100.float())
+        p_loss = perceptual_loss(reconstruction.float(), pseudoart100.float())
         generator_loss = adv_loss(logits_fake, target_is_real=True, for_discriminator=False)
         loss_g = recons_loss + quantization_loss + perceptual_weight * p_loss + adv_weight * generator_loss
 
@@ -292,9 +277,12 @@ for epoch in range(n_epochs):
         # Discriminator part
         optimizer_d.zero_grad(set_to_none=True)
 
-        logits_fake = discriminator(reconstruction.contiguous().detach())[-1]
+        #  logits_fake = discriminator(reconstruction.contiguous().detach())[-1]
+        logits_fake = discriminator(concatenation_input_recon.contiguous().detach())[-1]
         loss_d_fake = adv_loss(logits_fake, target_is_real=False, for_discriminator=True)
-        logits_real = discriminator(images.contiguous().detach())[-1]
+        concatenation_input_target = torch.cat((art10, pseudoart100), dim=1)
+        # logits_real = discriminator(images.contiguous().detach())[-1]
+        logits_real = discriminator(concatenation_input_target.contiguous().detach())[-1]
         loss_d_real = adv_loss(logits_real, target_is_real=True, for_discriminator=True)
         discriminator_loss = (loss_d_fake + loss_d_real) * 0.5
 
@@ -327,14 +315,20 @@ for epoch in range(n_epochs):
                 if args.pixel_range == -1:
                     writer.add_image(tag=f'Training/Input',
                                      # img_tensor=images[:n_example_images, 0, 8:-8, :],
-                                     img_tensor=(images[:n_example_images, 0, 8:-8, :]+1)/2,
+                                     img_tensor=(art10[:n_example_images, 0, 8:-8, :]+1)/2,
+                                     global_step=i)
+                    writer.add_image(tag=f'Training/Target',
+                                     img_tensor=(pseudoart100[:n_example_images, 0, 8:-8, :] + 1) / 2,
                                      global_step=i)
                     writer.add_image(tag=f'Training/Output', img_tensor=(reconstruction[:n_example_images, 0, 8:-8, :]+1)/2,
                                      global_step=i)
                 elif args.pixel_range == 0:
                     writer.add_image(tag=f'Training/Input',
                                      # img_tensor=images[:n_example_images, 0, 8:-8, :],
-                                     img_tensor=images[:n_example_images, 0, 8:-8, :],
+                                     img_tensor=art10[:n_example_images, 0, 8:-8, :],
+                                     global_step=i)
+                    writer.add_image(tag=f'Training/Target',
+                                     img_tensor=(pseudoart100[:n_example_images, 0, 8:-8, :] + 1) / 2,
                                      global_step=i)
                     writer.add_image(tag=f'Training/Output', img_tensor=reconstruction[:n_example_images, 0, 8:-8, :],
                                      global_step=i)
@@ -348,11 +342,12 @@ for epoch in range(n_epochs):
     val_loss = 0
     mse_batches, psnr_batches, ssim_batches, perceptual_batches = [], [], [], []
     with torch.no_grad():
-        for val_step, batch in enumerate(val_loader, start=1):
-            images = batch.to(device)
+        for val_step, (input_image, target_image) in enumerate(val_loader, start=1):
+            art10 = input_image.to(device)
+            pseudoart100 = target_image.to(device)
 
             # reconstruction, quantization_loss = model(images=images)
-            reconstruction, quantization_loss = model(images=images)
+            reconstruction, quantization_loss = model(images=art10)
 
             # get the first sample from the first validation batch for visualization
             # purposes
@@ -360,25 +355,27 @@ for epoch in range(n_epochs):
                 if args.pixel_range == -1:
                     intermediary_images.append((reconstruction[:n_example_images, 0]+1)/2)
                     # writer.add_image(tag=f'Validation/Input', img_tensor=images[:n_example_images, 0], global_step=i)
-                    writer.add_image(tag=f'Validation/Input', img_tensor=(images[:n_example_images, 0, 8:-8, :]+1)/2, global_step=i)
+                    writer.add_image(tag=f'Validation/Input', img_tensor=(art10[:n_example_images, 0, 8:-8, :]+1)/2, global_step=i)
+                    writer.add_image(tag=f'Validation/Target', img_tensor=(pseudoart100[:n_example_images, 0, 8:-8, :]+1)/2, global_step=i)
                     writer.add_image(tag=f'Validation/Output', img_tensor=(reconstruction[:n_example_images, 0, 8:-8, :]+1)/2,
                                      global_step=i)
                 elif args.pixel_range == 0:
                     intermediary_images.append(reconstruction[:n_example_images, 0])
                     # writer.add_image(tag=f'Validation/Input', img_tensor=images[:n_example_images, 0], global_step=i)
-                    writer.add_image(tag=f'Validation/Input', img_tensor=images[:n_example_images, 0, 8:-8, :], global_step=i)
+                    writer.add_image(tag=f'Validation/Input', img_tensor=art10[:n_example_images, 0, 8:-8, :], global_step=i)
+                    writer.add_image(tag=f'Validation/Target', img_tensor=pseudoart100[:n_example_images, 0, 8:-8, :], global_step=i)
                     writer.add_image(tag=f'Validation/Output', img_tensor=reconstruction[:n_example_images, 0, 8:-8, :],
                                      global_step=i)
 
-            recons_loss = l1_loss(reconstruction.float(), images.float())
+            recons_loss = l1_loss(reconstruction.float(), pseudoart100.float())
 
             val_loss += recons_loss.item()
 
             # Compute PSNR, SSIM, and MSE between input and reconstructed image
-            mse_batch = mean_flat((reconstruction[:, :, 8:-8, :] - images[:, :, 8:-8, :]) ** 2)
-            psnr_batch = PSNR(reconstruction[:, :, 8:-8, :], images[:, :, 8:-8, :])
-            ssim_batch = SSIM._compute_metric(reconstruction[:, :, 8:-8, :], images[:, :, 8:-8, :])
-            # perceptual_batch = perceptual_loss(reconstruction[:, :, 8:-8, :].float(), images[:, :, 8:-8, :].float())
+            mse_batch = mean_flat((reconstruction[:, :, 8:-8, :] - pseudoart100[:, :, 8:-8, :]) ** 2)
+            psnr_batch = PSNR(reconstruction[:, :, 8:-8, :], pseudoart100[:, :, 8:-8, :])
+            ssim_batch = SSIM._compute_metric(reconstruction[:, :, 8:-8, :], pseudoart100[:, :, 8:-8, :])
+            # perceptual_batch = perceptual_loss(reconstruction[:, :, 8:-8, :].float(), pseudoart100[:, :, 8:-8, :].float())
 
             mse_batches.append(mse_batch.mean().cpu())
             psnr_batches.append(psnr_batch.cpu())
@@ -436,66 +433,80 @@ if directory is None:
     shutil.rmtree(root_dir)
 
 # Load checkpoint
-ckpt_path = "/home/simone.sarrocco/thesis/project/models/diffusion_model/GenerativeModels/tutorials/generative/2d_vqgan/{args.model_name}/checkpoints/vqgan_best_checkpoint.ckpt"
+ckpt_path = f"/home/simone.sarrocco/thesis/project/models/diffusion_model/GenerativeModels/tutorials/generative/2d_vqgan/{args.model_name}/checkpoints/vqgan_best_checkpoint.ckpt"
 checkpoint = torch.load(ckpt_path, map_location=device)
 model.load_state_dict(checkpoint["state_dict"])
 model.eval()
 
-# Estimate latent range
-z_min, z_max = float("inf"), -float("inf")
-
-with torch.no_grad():
-    for i, batch in enumerate(train_loader):
-        images = batch.to(device)
-        z = model.encoder(images)
-        if isinstance(z, tuple):  # handle VQGAN returning (quant, loss)
-            z = z[0]
-        z_min = min(z_min, z.min().item())
-        z_max = max(z_max, z.max().item())
-
-print(f"Estimated latent range: min={z_min:.3f}, max={z_max:.3f}")
-
-
-tensorboard_dir = '/home/simone.sarrocco/thesis/project/models/diffusion_model/GenerativeModels/tutorials/generative/2d_vqgan/denoising_model/tensorboard_log'
-writer = SummaryWriter(log_dir=tensorboard_dir)
-# Define the directory to save checkpoints
-checkpoint_dir = "/home/simone.sarrocco/thesis/project/models/diffusion_model/GenerativeModels/tutorials/generative/2d_vqgan/denoising_model/checkpoints"
-os.makedirs(checkpoint_dir, exist_ok=True)
 PSNR = PeakSignalNoiseRatio().to(device)
 # SSIM = StructuralSimilarityIndexMeasure().to(device)
 SSIM = SSIMMetric(spatial_dims=2, reduction='mean_batch')
 # LPIPS = LearnedPerceptualImagePatchSimilarity(net_type='vgg', normalize=True).to(device)
 n_example_images = 1
+best_epoch = checkpoint["epoch"]
+
+outputs_dir = f"/home/simone.sarrocco/thesis/project/models/diffusion_model/GenerativeModels/tutorials/generative/2d_vqgan/{args.model_name}/testing"
+os.makedirs(outputs_dir, exist_ok=True)
 
 # Testing loop
 with torch.no_grad():
     mse_batches, psnr_batches, ssim_batches = [], [], []
-    for val_step, batch in enumerate(val_loader):
-        images = batch.to(device)
+    for test_step, (input_image, target_image) in enumerate(test_loader):
+        art10 = input_image.to(device)
+        pseudoart100 = target_image.to(device)
         # reconstruction, quantization_loss = model(images=images)
-        reconstruction, quantization_loss = model(images=images)
+        reconstruction, quantization_loss = model(images=art10)
 
         # get the first sample from the first validation batch for visualization
         # purposes
-        if val_step == 1:
+        if test_step == 1:
             if args.pixel_range == -1:
                 # writer.add_image(tag=f'Validation/Input', img_tensor=images[:n_example_images, 0], global_step=i)
-                writer.add_image(tag=f'Testing/Input', img_tensor=(images[:n_example_images, 0, 8:-8, :] + 1) / 2,
-                                 global_step=args.iteration)
+                writer.add_image(tag=f'Testing/Input', img_tensor=(art10[:n_example_images, 0, 8:-8, :] + 1) / 2,
+                                 global_step=best_epoch)
+                writer.add_image(tag=f'Testing/Target', img_tensor=(pseudoart100[:n_example_images, 0, 8:-8, :] + 1) / 2,
+                                 global_step=best_epoch)
                 writer.add_image(tag=f'Testing/Output',
                                  img_tensor=(reconstruction[:n_example_images, 0, 8:-8, :] + 1) / 2,
-                                 global_step=args.iteration)
+                                 global_step=best_epoch)
             elif args.pixel_range == 0:
                 # writer.add_image(tag=f'Validation/Input', img_tensor=images[:n_example_images, 0], global_step=i)
-                writer.add_image(tag=f'Testing/Input', img_tensor=images[:n_example_images, 0, 8:-8, :],
-                                 global_step=args.iteration)
+                writer.add_image(tag=f'Testing/Input', img_tensor=art10[:n_example_images, 0, 8:-8, :],
+                                 global_step=best_epoch)
+                writer.add_image(tag=f'Testing/Target', img_tensor=pseudoart100[:n_example_images, 0, 8:-8, :],
+                                 global_step=best_epoch)
                 writer.add_image(tag=f'Testing/Output', img_tensor=reconstruction[:n_example_images, 0, 8:-8, :],
-                                 global_step=args.iteration)
+                                 global_step=best_epoch)
+
+        for i in range(art10.shape[0]):
+            # one grid for each image in each batch
+            grid = create_grid(
+                reconstruction[i, :, 8:-8, :],
+                art10[i, :, 8:-8, :],
+                pseudoart100[i, :, 8:-8, :]
+            )
+            grid_np = grid.permute(1, 2, 0).numpy()
+            grid_np = (grid_np * 255).astype(np.uint8)
+            final_grid = Image.fromarray(grid_np)
+            final_grid.save(f'{outputs_dir}/Grids_Input_Target_Output/Sample_{test_step+1}_{i + 1}.png')
+            # cv2.imwrite(filename=f'{path}/Grids_Input_Target_Output/Sample_{batch_idx + 1}_{i + 1}.png', img=grid)
+            # self.writer.add_image(f'{phase}/Sample_{batch_idx + 1}_{i + 1}', grid,
+            #                      self.step + self.resume_step)
+
+        # We compute and save the difference map between output and target (in the range [0,1])
+        save_difference_maps_diffusion_paper(
+            art10, pseudoart100, reconstruction,
+            best_epoch, test_step + 1,
+            histogram=True,
+            writer=writer,
+            phase='Testing',
+            folder=outputs_dir,
+        )
 
         # Compute PSNR, SSIM, and MSE between input and reconstructed image
-        mse_batch = mean_flat((reconstruction[:, :, 8:-8, :] - images[:, :, 8:-8, :]) ** 2)
-        psnr_batch = PSNR(reconstruction[:, :, 8:-8, :], images[:, :, 8:-8, :])
-        ssim_batch = SSIM._compute_metric(reconstruction[:, :, 8:-8, :], images[:, :, 8:-8, :])
+        mse_batch = mean_flat((reconstruction[:, :, 8:-8, :] - pseudoart100[:, :, 8:-8, :]) ** 2)
+        psnr_batch = PSNR(reconstruction[:, :, 8:-8, :], pseudoart100[:, :, 8:-8, :])
+        ssim_batch = SSIM._compute_metric(reconstruction[:, :, 8:-8, :], pseudoart100[:, :, 8:-8, :])
         # perceptual_batch = perceptual_loss(reconstruction[:, :, 8:-8, :].float(), images[:, :, 8:-8, :].float())
 
         mse_batches.append(mse_batch.mean().cpu())
@@ -523,6 +534,6 @@ with torch.no_grad():
     }
 
     for metric_name, value in metrics_summary.items():
-        writer.add_scalar(f"Testing_metrics/{metric_name}", value.item(), args.iteration)
+        writer.add_scalar(f"Testing_metrics/{metric_name}", value.item(), best_epoch)
     print(
-        f"Testing metrics, epoch {args.iteration}: PSNR: {avg_psnr.item():.5f} ± {std_psnr.item():.5f} | SSIM: {avg_ssim.item():.5f} ± {std_ssim.item():.5f} | MSE: {avg_mse.item():.5f} ± {std_mse.item():.5f}")
+        f"Testing metrics, epoch {best_epoch}: PSNR: {avg_psnr.item():.5f} ± {std_psnr.item():.5f} | SSIM: {avg_ssim.item():.5f} ± {std_ssim.item():.5f} | MSE: {avg_mse.item():.5f} ± {std_mse.item():.5f}")
