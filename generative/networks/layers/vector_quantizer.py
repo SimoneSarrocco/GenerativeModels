@@ -134,7 +134,7 @@ class EMAQuantizer(nn.Module):
         Returns:
             torch.Tensor: Quantize space representation of encoding_indices in channel first format.
         """
-        with torch.cuda.amp.autocast(enabled=False):
+        with torch.amp.autocast('cuda', enabled=False):
             return self.embedding(embedding_indices).permute(self.quantization_permutation).contiguous()
 
     @torch.jit.unused

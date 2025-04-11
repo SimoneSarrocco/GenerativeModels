@@ -41,6 +41,23 @@
 # %% [markdown]
 # ## Setup imports
 
+class EarlyStopper:
+    def __init__(self, patience=1, min_delta=0.):
+        self.patience = patience
+        self.min_delta = min_delta
+        self.counter = 0
+        self.min_validation_loss = float('inf')
+
+    def early_stop(self, validation_loss):
+        if validation_loss < self.min_validation_loss:
+            self.min_validation_loss = validation_loss
+            self.counter = 0
+        elif validation_loss > (self.min_validation_loss + self.min_delta):
+            self.counter += 1
+            if self.counter >= self.patience:
+                return True
+        return False
+
 # %%
 import os
 import sys
@@ -66,7 +83,21 @@ from dataset import OCTDataset
 from torch.utils.tensorboard import SummaryWriter
 from torchmetrics.image.lpip import LearnedPerceptualImagePatchSimilarity
 from torchmetrics.image import PeakSignalNoiseRatio, StructuralSimilarityIndexMeasure
+import argparse
 print_config()
+
+
+def parse_args_and_config():
+    parser = argparse.ArgumentParser(description="Train VQGAN model")
+    parser.add_argument("--num_embeddings", type=int, required=True, help="Number of embedding vectors")
+    parser.add_argument("--embedding_dimension", type=int, required=True, help="Embedding dimension of each vector")
+    parser.add_argument("--pixel_range", type=int, default=0, help="Pixel range of each image, 0 means [0,1], -1 means [-1,1]")
+    parser.add_argument("--iteration", type=int, default=0, help="Number of current epoch from which to sample")
+    parser.add_argument("--model_name", type=str, default='', help="Name of the model configuration")
+
+    args = parser.parse_args()
+
+    return args
 
 
 def save_checkpoint(model, epoch, save_dir="checkpoints"):
@@ -85,7 +116,7 @@ def save_checkpoint(model, epoch, save_dir="checkpoints"):
         "epoch": epoch,  # Save the current epoch for reference
     }
 
-    checkpoint_path = os.path.join(save_dir, f"vqgan_epoch_{epoch}.ckpt")
+    checkpoint_path = os.path.join(save_dir, f"vqgan_best_checkpoint.ckpt")
     torch.save(checkpoint, checkpoint_path)
     print(f"Checkpoint saved: {checkpoint_path}")
 
@@ -122,6 +153,8 @@ set_determinism(1927)
 # (https://docs.monai.io/en/stable/apps.html#monai.apps.MedNISTDataset). In order to train faster, we will select just
 # one of the available classes ("HeadCT").
 
+args = parse_args_and_config()
+
 train = np.load('/home/simone.sarrocco/thesis/project/data/train_set_patient_split.npz')['images']
 val = np.load('/home/simone.sarrocco/thesis/project/data/val_set_patient_split.npz')['images']
 test = np.load('/home/simone.sarrocco/thesis/project/data/test_set_patient_split.npz')['images']
@@ -153,18 +186,10 @@ test_images = torch.stack(test_images, 0)
 
 val_images = torch.cat((val_images, test_images), dim=0)
 
-train_data = OCTDataset(train_images, transform=True)
+train_data = OCTDataset(train_images, transform=True, pixel_range=args.pixel_range)
 train_loader = DataLoader(train_data, batch_size=1, shuffle=True, num_workers=64)
 print(f'Shape of training set: {train_images.shape}')
 # train_datalist = [{"image": train[i, -1:, ...]} for i in range(len(train))]
-
-# %% [markdown]
-# Here we use transforms to augment the training dataset:
-#
-# 1. `LoadImaged` loads the hands images from files.
-# 1. `EnsureChannelFirstd` ensures the original data to construct "channel first" shape.
-# 1. `ScaleIntensityRanged` extracts intensity range [0, 255] and scales to [0, 1].
-# 1. `RandAffined` efficiently performs rotate, scale, shear, translate, etc. together based on PyTorch affine transform.
 
 # %%
 val_data = OCTDataset(val_images)
@@ -172,21 +197,9 @@ val_data = OCTDataset(val_images)
 val_loader = DataLoader(val_data, batch_size=1, shuffle=False, num_workers=64)
 print(f'Shape of validation set: {val_images.shape}')
 
-# %% [markdown]
-# ### Visualization of the training images
-
-# %%
-
-# %% [markdown]
-# ### Define network, scheduler and optimizer
-# At this step, we instantiate the MONAI components to create a VQVAE and a Discriminator model. We are using the
-# Discriminator to train the Autoencoder with a Generative Adversarial loss, where the VQVAE works as a Generator.
-# The VQVAE is trained to minimize the reconstruction error, a perceptual loss using AlexNet as the embedding model
-# and an adversarial loss versus the performance of the Discriminator.
 
 # %%
 device = torch.device("cuda")
-
 model = VQVAE(
     spatial_dims=2,
     in_channels=1,
@@ -196,10 +209,11 @@ model = VQVAE(
     num_res_layers=2,
     downsample_parameters=((2, 4, 1, 1), (2, 4, 1, 1)),
     upsample_parameters=((2, 4, 1, 1, 0), (2, 4, 1, 1, 0)),
-    num_embeddings=16384,  # this is "k"
-    embedding_dim=32,  # this is "d"
+    num_embeddings=args.num_embeddings,  # this is "k"
+    embedding_dim=args.embedding_dimension,  # this is "d"
 )
 model.to(device)
+
 
 discriminator = PatchDiscriminator(spatial_dims=2, in_channels=1, num_layers_d=3, num_channels=64)
 discriminator.to(device)
@@ -216,12 +230,12 @@ adv_loss = PatchAdversarialLoss(criterion="least_squares")
 adv_weight = 0.01
 perceptual_weight = 0.001
 
-run_name = 'vqgan-newest-using-BBDM-classes'
-
-tensorboard_dir = f'/home/simone.sarrocco/thesis/project/models/diffusion_model/GenerativeModels/tutorials/generative/2d_vqgan/{run_name}/tensorboard_log'
+# tensorboard_dir = f'/home/simone.sarrocco/thesis/project/models/diffusion_model/GenerativeModels/tutorials/generative/2d_vqgan/vqgan-2layers-embeddim-{args.embedding_dimension}-num-embed-{args.num_embeddings}-pixel_range-{args.pixel_range}/tensorboard_log'
+tensorboard_dir = f'/home/simone.sarrocco/thesis/project/models/diffusion_model/GenerativeModels/tutorials/generative/2d_vqgan/{args.model_name}/tensorboard_log'
 writer = SummaryWriter(log_dir=tensorboard_dir)
 # Define the directory to save checkpoints
-checkpoint_dir = f"/home/simone.sarrocco/thesis/project/models/diffusion_model/GenerativeModels/tutorials/generative/2d_vqgan/{run_name}/checkpoints"
+# checkpoint_dir = f"/home/simone.sarrocco/thesis/project/models/diffusion_model/GenerativeModels/tutorials/generative/2d_vqgan/vqgan-2layers-embeddim-{args.embedding_dimension}-num-embed-{args.num_embeddings}-pixel_range-{args.pixel_range}/checkpoints"
+checkpoint_dir = f"/home/simone.sarrocco/thesis/project/models/diffusion_model/GenerativeModels/tutorials/generative/2d_vqgan/{args.model_name}/checkpoints"
 os.makedirs(checkpoint_dir, exist_ok=True)
 
 # %% [markdown]
@@ -237,12 +251,14 @@ epoch_disc_loss_list = []
 val_recon_epoch_loss_list = []
 intermediary_images = []
 n_example_images = 1
+early_stopper = EarlyStopper(patience=20, min_delta=0.0001)
 
 total_start = time.time()
 i = 0
+best_val_loss = float("inf")
 PSNR = PeakSignalNoiseRatio().to(device)
 # SSIM = StructuralSimilarityIndexMeasure().to(device)
-SSIM = SSIMMetric(spatial_dims=2)
+SSIM = SSIMMetric(spatial_dims=2, reduction='mean_batch')
 # LPIPS = LearnedPerceptualImagePatchSimilarity(net_type='vgg', normalize=True).to(device)
 
 for epoch in range(n_epochs):
@@ -251,9 +267,10 @@ for epoch in range(n_epochs):
     epoch_loss = 0
     gen_epoch_loss = 0
     disc_epoch_loss = 0
-    mse_batches, psnr_batches, ssim_batches, perceptual_batches = [], [], [], []
+    mse_batches, psnr_batches, ssim_batches = [], [], []
     progress_bar = tqdm(enumerate(train_loader), total=len(train_loader), ncols=110)
     progress_bar.set_description(f"Epoch {epoch}")
+    # Training loop
     for step, batch in progress_bar:
         images = batch.to(device)
         optimizer_g.zero_grad(set_to_none=True)
@@ -307,99 +324,66 @@ for epoch in range(n_epochs):
 
             # Every epoch visualize input image and corresponding reconstruction on tensorboard
             if i % 1980 == 0:
-                writer.add_image(tag=f'Training/Input',
-                                 # img_tensor=images[:n_example_images, 0, 8:-8, :],
-                                 img_tensor=images[:n_example_images, 0, 8:-8, :],
-                                 global_step=i)
-                writer.add_image(tag=f'Training/Output', img_tensor=reconstruction[:n_example_images, 0, 8:-8, :],
-                                 global_step=i)
-            """
-            # Compute PSNR, SSIM, MSE, and LPIPS between input image and reconstructed image
+                if args.pixel_range == -1:
+                    writer.add_image(tag=f'Training/Input',
+                                     # img_tensor=images[:n_example_images, 0, 8:-8, :],
+                                     img_tensor=(images[:n_example_images, 0, 8:-8, :]+1)/2,
+                                     global_step=i)
+                    writer.add_image(tag=f'Training/Output', img_tensor=(reconstruction[:n_example_images, 0, 8:-8, :]+1)/2,
+                                     global_step=i)
+                elif args.pixel_range == 0:
+                    writer.add_image(tag=f'Training/Input',
+                                     # img_tensor=images[:n_example_images, 0, 8:-8, :],
+                                     img_tensor=images[:n_example_images, 0, 8:-8, :],
+                                     global_step=i)
+                    writer.add_image(tag=f'Training/Output', img_tensor=reconstruction[:n_example_images, 0, 8:-8, :],
+                                     global_step=i)
+
+    epoch_recon_loss_list.append(epoch_loss / (step + 1))
+    epoch_gen_loss_list.append(gen_epoch_loss / (step + 1))
+    epoch_disc_loss_list.append(disc_epoch_loss / (step + 1))
+
+    # Validation loop
+    model.eval()
+    val_loss = 0
+    mse_batches, psnr_batches, ssim_batches, perceptual_batches = [], [], [], []
+    with torch.no_grad():
+        for val_step, batch in enumerate(val_loader, start=1):
+            images = batch.to(device)
+
+            # reconstruction, quantization_loss = model(images=images)
+            reconstruction, quantization_loss = model(images=images)
+
+            # get the first sample from the first validation batch for visualization
+            # purposes
+            if val_step == 1:
+                if args.pixel_range == -1:
+                    intermediary_images.append((reconstruction[:n_example_images, 0]+1)/2)
+                    # writer.add_image(tag=f'Validation/Input', img_tensor=images[:n_example_images, 0], global_step=i)
+                    writer.add_image(tag=f'Validation/Input', img_tensor=(images[:n_example_images, 0, 8:-8, :]+1)/2, global_step=i)
+                    writer.add_image(tag=f'Validation/Output', img_tensor=(reconstruction[:n_example_images, 0, 8:-8, :]+1)/2,
+                                     global_step=i)
+                elif args.pixel_range == 0:
+                    intermediary_images.append(reconstruction[:n_example_images, 0])
+                    # writer.add_image(tag=f'Validation/Input', img_tensor=images[:n_example_images, 0], global_step=i)
+                    writer.add_image(tag=f'Validation/Input', img_tensor=images[:n_example_images, 0, 8:-8, :], global_step=i)
+                    writer.add_image(tag=f'Validation/Output', img_tensor=reconstruction[:n_example_images, 0, 8:-8, :],
+                                     global_step=i)
+
+            recons_loss = l1_loss(reconstruction.float(), images.float())
+
+            val_loss += recons_loss.item()
+
+            # Compute PSNR, SSIM, and MSE between input and reconstructed image
             mse_batch = mean_flat((reconstruction[:, :, 8:-8, :] - images[:, :, 8:-8, :]) ** 2)
             psnr_batch = PSNR(reconstruction[:, :, 8:-8, :], images[:, :, 8:-8, :])
-            ssim_batch = SSIM(reconstruction[:, :, 8:-8, :], images[:, :, 8:-8, :])
-            perceptual_batch = perceptual_loss(reconstruction[:, :, 8:-8, :].float(), images[:, :, 8:-8, :].float())
+            ssim_batch = SSIM._compute_metric(reconstruction[:, :, 8:-8, :], images[:, :, 8:-8, :])
+            # perceptual_batch = perceptual_loss(reconstruction[:, :, 8:-8, :].float(), images[:, :, 8:-8, :].float())
 
             mse_batches.append(mse_batch.mean().cpu())
             psnr_batches.append(psnr_batch.cpu())
             ssim_batches.append(ssim_batch.cpu())
-            perceptual_batches.append(perceptual_batch.cpu())
-
-            # output_3_channels = reconstruction[:, :, 8:-8, :].repeat(1, 3, 1, 1)  # (Batch, Channels, Height, Width)
-            # target_3_channels = images[:, :, 8:-8, :].repeat(1, 3, 1, 1)  # (Batch, Channels, Height, Width)
-            # lpips_batch = LPIPS(output_3_channels, target_3_channels)
-            # lpips_batches.append(lpips_batch.cpu())
-            """
-    epoch_recon_loss_list.append(epoch_loss / (step + 1))
-    epoch_gen_loss_list.append(gen_epoch_loss / (step + 1))
-    epoch_disc_loss_list.append(disc_epoch_loss / (step + 1))
-    """
-    psnr_batches = np.asarray(psnr_batches, dtype=np.float32)
-    ssim_batches = np.asarray(ssim_batches, dtype=np.float32)
-    mse_batches = np.asarray(mse_batches, dtype=np.float32)
-    perceptual_batches = np.asarray(perceptual_batches, dtype=np.float32)
-
-    # Calculate averages
-    avg_psnr, std_psnr = np.mean(psnr_batches), np.std(psnr_batches)
-    avg_ssim, std_ssim = np.mean(ssim_batches), np.std(ssim_batches)
-    avg_mse, std_mse = np.mean(mse_batches), np.std(mse_batches)
-    avg_perceptual, std_perceptual = np.mean(perceptual_batches), np.std(perceptual_batches)
-
-    # Log average metrics to TensorBoard
-    metrics_summary = {
-        "PSNR": avg_psnr,
-        "SSIM": avg_ssim,
-        "MSE": avg_mse,
-        "PERC_LOSS": avg_perceptual,
-    }
-
-    for metric_name, value in metrics_summary.items():
-        writer.add_scalar(f"Training_metrics/{metric_name}", value.item(), epoch + 1)
-    print(
-        f"Training metrics, epoch {epoch + 1}: PSNR: {avg_psnr.item():.5f} ± {std_psnr.item():.5f} | SSIM: {avg_ssim.item():.5f} ± {std_ssim.item():.5f} | MSE: {avg_mse.item():.5f} ± {std_mse.item():.5f} | PERC_LOSS: {avg_perceptual.item():.5f} ± {std_perceptual.item():.5f}")
-    """
-    if (epoch + 1) % val_interval == 0:
-        model.eval()
-        val_loss = 0
-        mse_batches, psnr_batches, ssim_batches, perceptual_batches = [], [], [], []
-        with torch.no_grad():
-            for val_step, batch in enumerate(val_loader, start=1):
-                images = batch.to(device)
-
-                # reconstruction, quantization_loss = model(images=images)
-                reconstruction, quantization_loss = model(images=images)
-
-                # get the first sample from the first validation batch for visualization
-                # purposes
-                if val_step == 1:
-                    intermediary_images.append(reconstruction[:n_example_images, 0])
-                    # writer.add_image(tag=f'Validation/Input', img_tensor=images[:n_example_images, 0], global_step=i)
-                    writer.add_image(tag=f'Validation/Input', img_tensor=images[:n_example_images, 0], global_step=i)
-                    writer.add_image(tag=f'Validation/Output', img_tensor=reconstruction[:n_example_images, 0], global_step=i)
-
-                recons_loss = l1_loss(reconstruction.float(), images.float())
-
-                val_loss += recons_loss.item()
-
-                # Compute PSNR, SSIM, MSE, and LPIPS between input image and reconstructed image
-                # mse_batch = mean_flat((reconstruction[:, :, 8:-8, :] - images[:, :, 8:-8, :]) ** 2)
-                mse_batch = mean_flat((reconstruction[:, :, 8:-8, :] - images[:, :, 8:-8, :]) ** 2)
-                # psnr_batch = PSNR(reconstruction[:, :, 8:-8, :], images[:, :, 8:-8, :])
-                psnr_batch = PSNR(reconstruction[:, :, 8:-8, :], images[:, :, 8:-8, :])
-                # ssim_batch = SSIM._compute_metric(reconstruction[:, :, 8:-8, :], images[:, :, 8:-8, :])
-                ssim_batch = SSIM._compute_metric(reconstruction[:, :, 8:-8, :], images[:, :, 8:-8, :])
-                # perceptual_batch = perceptual_loss(reconstruction[:, :, 8:-8, :].float(), images[:, :, 8:-8, :].float())
-                perceptual_batch = perceptual_loss(reconstruction[:, :, 8:-8, :].float(), images[:, :, 8:-8, :].float())
-
-                mse_batches.append(mse_batch.mean().cpu())
-                psnr_batches.append(psnr_batch.cpu())
-                ssim_batches.append(ssim_batch.cpu())
-                perceptual_batches.append(perceptual_batch.cpu())
-
-                # output_3_channels = reconstruction[:, :, 8:-8, :].repeat(1, 3, 1, 1)  # (Batch, Channels, Height, Width)
-                # target_3_channels = images[:, :, 8:-8, :].repeat(1, 3, 1, 1)  # (Batch, Channels, Height, Width)
-                # lpips_batch = LPIPS(output_3_channels, target_3_channels)
-                # lpips_batches.append(lpips_batch.cpu())
+            # perceptual_batches.append(perceptual_batch.cpu())
 
         val_loss /= val_step
         val_recon_epoch_loss_list.append(val_loss)
@@ -408,30 +392,37 @@ for epoch in range(n_epochs):
         psnr_batches = np.asarray(psnr_batches, dtype=np.float32)
         ssim_batches = np.asarray(ssim_batches, dtype=np.float32)
         mse_batches = np.asarray(mse_batches, dtype=np.float32)
-        perceptual_batches = np.asarray(perceptual_batches, dtype=np.float32)
+        # perceptual_batches = np.asarray(perceptual_batches, dtype=np.float32)
 
         # Calculate averages
         avg_psnr, std_psnr = np.mean(psnr_batches), np.std(psnr_batches)
         avg_ssim, std_ssim = np.mean(ssim_batches), np.std(ssim_batches)
         avg_mse, std_mse = np.mean(mse_batches), np.std(mse_batches)
-        avg_perceptual, std_perceptual = np.mean(perceptual_batches), np.std(perceptual_batches)
+        # avg_perceptual, std_perceptual = np.mean(perceptual_batches), np.std(perceptual_batches)
 
         # Log average metrics to TensorBoard
         metrics_summary = {
             "PSNR": avg_psnr,
             "SSIM": avg_ssim,
             "MSE": avg_mse,
-            "PERC_LOSS": avg_perceptual,
+            # "PERC_LOSS": avg_perceptual,
         }
 
         for metric_name, value in metrics_summary.items():
             writer.add_scalar(f"Validation_metrics/{metric_name}", value.item(), epoch + 1)
         print(
-            f"Validation metrics, epoch {epoch + 1}: PSNR: {avg_psnr.item():.5f} ± {std_psnr.item():.5f} | SSIM: {avg_ssim.item():.5f} ± {std_ssim.item():.5f} | MSE: {avg_mse.item():.5f} ± {std_mse.item():.5f} | PERC_LOSS: {avg_perceptual.item():.5f} ± {std_perceptual.item():.5f}")
+            f"Validation metrics, epoch {epoch + 1}: PSNR: {avg_psnr.item():.5f} ± {std_psnr.item():.5f} | SSIM: {avg_ssim.item():.5f} ± {std_ssim.item():.5f} | MSE: {avg_mse.item():.5f} ± {std_mse.item():.5f}")
 
-    # Save model checkpoint every 50 epochs
-    if (epoch + 1) % 10 == 0:
+    # Save checkpoint if validation loss improves
+    if val_loss < best_val_loss:
+        best_val_loss = val_loss
         save_checkpoint(model, epoch + 1, save_dir=checkpoint_dir)
+        print(f"Saved best model with validation loss: {val_loss:.6f}")
+
+    # Early Stopping if the validation loss has not decreased for more than value_of_patience epochs in a row
+    if early_stopper.early_stop(val_loss):
+        print(f"Early stopping at epoch: {epoch+1}")
+        break
 
 total_time = time.time() - total_start
 print(f"train completed, total time: {total_time}.")
@@ -444,62 +435,94 @@ print(f"train completed, total time: {total_time}.")
 if directory is None:
     shutil.rmtree(root_dir)
 
+# Load checkpoint
+ckpt_path = "/home/simone.sarrocco/thesis/project/models/diffusion_model/GenerativeModels/tutorials/generative/2d_vqgan/{args.model_name}/checkpoints/vqgan_best_checkpoint.ckpt"
+checkpoint = torch.load(ckpt_path, map_location=device)
+model.load_state_dict(checkpoint["state_dict"])
+model.eval()
 
-# %% [markdown]
-# ### Learning curves
+# Estimate latent range
+z_min, z_max = float("inf"), -float("inf")
 
-"""
-# %%
-plt.style.use("seaborn-v0_8")
-plt.title("Learning Curves", fontsize=20)
-plt.plot(np.linspace(1, n_epochs, n_epochs), epoch_recon_loss_list, color="C0", linewidth=2.0, label="Train")
-plt.plot(
-    np.linspace(val_interval, n_epochs, int(n_epochs / val_interval)),
-    val_recon_epoch_loss_list,
-    color="C1",
-    linewidth=2.0,
-    label="Validation",
-)
-plt.yticks(fontsize=12)
-plt.xticks(fontsize=12)
-plt.xlabel("Epochs", fontsize=16)
-plt.ylabel("Loss", fontsize=16)
-plt.legend(prop={"size": 14})
-plt.show()
+with torch.no_grad():
+    for i, batch in enumerate(train_loader):
+        images = batch.to(device)
+        z = model.encoder(images)
+        if isinstance(z, tuple):  # handle VQGAN returning (quant, loss)
+            z = z[0]
+        z_min = min(z_min, z.min().item())
+        z_max = max(z_max, z.max().item())
 
-# %%
-plt.title("Adversarial Training Curves", fontsize=20)
-plt.plot(np.linspace(1, n_epochs, n_epochs), epoch_gen_loss_list, color="C0", linewidth=2.0, label="Generator")
-plt.plot(np.linspace(1, n_epochs, n_epochs), epoch_disc_loss_list, color="C1", linewidth=2.0, label="Discriminator")
-plt.yticks(fontsize=12)
-plt.xticks(fontsize=12)
-plt.xlabel("Epochs", fontsize=16)
-plt.ylabel("Loss", fontsize=16)
-plt.legend(prop={"size": 14})
-plt.show()
-
-# %% [markdown]
-# ### Checking reconstructions
-
-# %%
-# Plot first 4 evaluations
-val_samples = np.linspace(val_interval, n_epochs, int(n_epochs / val_interval))
-fig, ax = plt.subplots(nrows=4, ncols=1, sharey=True)
-for image_n in range(4):
-    reconstructions = torch.reshape(intermediary_images[image_n], (64 * n_example_images, 64)).T
-    ax[image_n].imshow(reconstructions.cpu(), cmap="gray")
-    ax[image_n].set_xticks([])
-    ax[image_n].set_yticks([])
-    ax[image_n].set_ylabel(f"Epoch {val_samples[image_n]:.0f}")
+print(f"Estimated latent range: min={z_min:.3f}, max={z_max:.3f}")
 
 
-# %%
-fig, ax = plt.subplots(nrows=1, ncols=2)
-ax[0].imshow(images[0, 0].detach().cpu(), vmin=0, vmax=1, cmap="gray")
-ax[0].axis("off")
-ax[0].title.set_text("Inputted Image")
-ax[1].imshow(reconstruction[0, 0].detach().cpu(), vmin=0, vmax=1, cmap="gray")
-ax[1].axis("off")
-ax[1].title.set_text("Reconstruction")
-plt.show()
-"""
+tensorboard_dir = '/home/simone.sarrocco/thesis/project/models/diffusion_model/GenerativeModels/tutorials/generative/2d_vqgan/denoising_model/tensorboard_log'
+writer = SummaryWriter(log_dir=tensorboard_dir)
+# Define the directory to save checkpoints
+checkpoint_dir = "/home/simone.sarrocco/thesis/project/models/diffusion_model/GenerativeModels/tutorials/generative/2d_vqgan/denoising_model/checkpoints"
+os.makedirs(checkpoint_dir, exist_ok=True)
+PSNR = PeakSignalNoiseRatio().to(device)
+# SSIM = StructuralSimilarityIndexMeasure().to(device)
+SSIM = SSIMMetric(spatial_dims=2, reduction='mean_batch')
+# LPIPS = LearnedPerceptualImagePatchSimilarity(net_type='vgg', normalize=True).to(device)
+n_example_images = 1
+
+# Testing loop
+with torch.no_grad():
+    mse_batches, psnr_batches, ssim_batches = [], [], []
+    for val_step, batch in enumerate(val_loader):
+        images = batch.to(device)
+        # reconstruction, quantization_loss = model(images=images)
+        reconstruction, quantization_loss = model(images=images)
+
+        # get the first sample from the first validation batch for visualization
+        # purposes
+        if val_step == 1:
+            if args.pixel_range == -1:
+                # writer.add_image(tag=f'Validation/Input', img_tensor=images[:n_example_images, 0], global_step=i)
+                writer.add_image(tag=f'Testing/Input', img_tensor=(images[:n_example_images, 0, 8:-8, :] + 1) / 2,
+                                 global_step=args.iteration)
+                writer.add_image(tag=f'Testing/Output',
+                                 img_tensor=(reconstruction[:n_example_images, 0, 8:-8, :] + 1) / 2,
+                                 global_step=args.iteration)
+            elif args.pixel_range == 0:
+                # writer.add_image(tag=f'Validation/Input', img_tensor=images[:n_example_images, 0], global_step=i)
+                writer.add_image(tag=f'Testing/Input', img_tensor=images[:n_example_images, 0, 8:-8, :],
+                                 global_step=args.iteration)
+                writer.add_image(tag=f'Testing/Output', img_tensor=reconstruction[:n_example_images, 0, 8:-8, :],
+                                 global_step=args.iteration)
+
+        # Compute PSNR, SSIM, and MSE between input and reconstructed image
+        mse_batch = mean_flat((reconstruction[:, :, 8:-8, :] - images[:, :, 8:-8, :]) ** 2)
+        psnr_batch = PSNR(reconstruction[:, :, 8:-8, :], images[:, :, 8:-8, :])
+        ssim_batch = SSIM._compute_metric(reconstruction[:, :, 8:-8, :], images[:, :, 8:-8, :])
+        # perceptual_batch = perceptual_loss(reconstruction[:, :, 8:-8, :].float(), images[:, :, 8:-8, :].float())
+
+        mse_batches.append(mse_batch.mean().cpu())
+        psnr_batches.append(psnr_batch.cpu())
+        ssim_batches.append(ssim_batch.cpu())
+        # perceptual_batches.append(perceptual_batch.cpu())
+
+    psnr_batches = np.asarray(psnr_batches, dtype=np.float32)
+    ssim_batches = np.asarray(ssim_batches, dtype=np.float32)
+    mse_batches = np.asarray(mse_batches, dtype=np.float32)
+    # perceptual_batches = np.asarray(perceptual_batches, dtype=np.float32)
+
+    # Calculate averages
+    avg_psnr, std_psnr = np.mean(psnr_batches), np.std(psnr_batches)
+    avg_ssim, std_ssim = np.mean(ssim_batches), np.std(ssim_batches)
+    avg_mse, std_mse = np.mean(mse_batches), np.std(mse_batches)
+    # avg_perceptual, std_perceptual = np.mean(perceptual_batches), np.std(perceptual_batches)
+
+    # Log average metrics to TensorBoard
+    metrics_summary = {
+        "PSNR": avg_psnr,
+        "SSIM": avg_ssim,
+        "MSE": avg_mse,
+        # "PERC_LOSS": avg_perceptual,
+    }
+
+    for metric_name, value in metrics_summary.items():
+        writer.add_scalar(f"Testing_metrics/{metric_name}", value.item(), args.iteration)
+    print(
+        f"Testing metrics, epoch {args.iteration}: PSNR: {avg_psnr.item():.5f} ± {std_psnr.item():.5f} | SSIM: {avg_ssim.item():.5f} ± {std_ssim.item():.5f} | MSE: {avg_mse.item():.5f} ± {std_mse.item():.5f}")

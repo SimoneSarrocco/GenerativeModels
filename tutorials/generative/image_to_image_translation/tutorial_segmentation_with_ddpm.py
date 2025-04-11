@@ -83,6 +83,90 @@ def mean_flat(tensor):
     """
     return tensor.mean(dim=list(range(1, len(tensor.shape))))
 
+
+def resume_training(model, optimizer, scheduler, checkpoint_path, start_epoch=0):
+    """
+    Resume training from a checkpoint.
+
+    Args:
+        model: The DiffusionModelUNet model
+        optimizer: The optimizer (Adam)
+        scheduler: The DDPMScheduler
+        checkpoint_path: Path to the checkpoint file
+        start_epoch: The epoch to resume from (default: 0, determined from checkpoint filename if possible)
+
+    Returns:
+        model: The loaded model
+        optimizer: The loaded optimizer if optimizer state was saved
+        start_epoch: The epoch to resume from
+    """
+    print(f"Loading checkpoint from {checkpoint_path}")
+
+    # Extract epoch number from filename if not provided
+    if start_epoch == 0 and "epoch" not in checkpoint_path:
+        try:
+            # Try to extract epoch number from filename (e.g., ddpm_oct_model_50.pt → 50)
+            filename = os.path.basename(checkpoint_path)
+            epoch_str = filename.split('_')[-1].split('.')[0]
+            if epoch_str.isdigit():
+                start_epoch = int(epoch_str)
+            print(f"Extracted start epoch: {start_epoch}")
+        except:
+            print("Could not extract epoch number from filename. Starting from provided start_epoch.")
+
+    # Load the state dict
+    checkpoint = torch.load(checkpoint_path)
+
+    # If checkpoint is just the model state dict
+    if isinstance(checkpoint, dict) and all(k.startswith("module.") or "." in k for k in checkpoint.keys()):
+        model.load_state_dict(checkpoint)
+        print("Loaded model weights only.")
+        return model, optimizer, start_epoch
+
+    # If checkpoint contains more info (full training state)
+    if isinstance(checkpoint, dict) and "model_state_dict" in checkpoint:
+        model.load_state_dict(checkpoint["model_state_dict"])
+        if "optimizer_state_dict" in checkpoint and optimizer is not None:
+            optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+        if "epoch" in checkpoint:
+            start_epoch = checkpoint["epoch"] + 1  # +1 because we want to start from the next epoch
+        if "scheduler_state" in checkpoint and scheduler is not None:
+            scheduler.load_state_dict(checkpoint["scheduler_state"])
+        print(f"Loaded complete training state. Resuming from epoch {start_epoch}")
+        return model, optimizer, start_epoch
+
+    print("Loaded model weights. Optimizer and scheduler states not found.")
+    return model, optimizer, start_epoch
+
+
+def save_checkpoint(model, optimizer, scheduler, epoch, checkpoint_dir, is_final=False):
+    """
+    Save a checkpoint with full training state.
+
+    Args:
+        model: The model to save
+        optimizer: The optimizer to save
+        scheduler: The noise scheduler
+        epoch: Current epoch number
+        checkpoint_dir: Directory to save the checkpoint
+        is_final: Whether this is the final checkpoint of training
+    """
+    checkpoint = {
+        "epoch": epoch,
+        "model_state_dict": model.state_dict(),
+        "optimizer_state_dict": optimizer.state_dict(),
+        "scheduler_state": scheduler.get_state() if hasattr(scheduler, "get_state") else None,
+    }
+
+    if is_final:
+        checkpoint_path = f"{checkpoint_dir}/ddpm_oct_model_final.pt"
+    else:
+        checkpoint_path = f"{checkpoint_dir}/ddpm_oct_model_epoch_{epoch}.pt"
+
+    torch.save(checkpoint, checkpoint_path)
+    print(f"Saved checkpoint at epoch {epoch} to {checkpoint_path}")
+
+
 torch.multiprocessing.set_sharing_strategy("file_system")
 print_config()
 # -
@@ -96,7 +180,7 @@ root_dir = tempfile.mkdtemp() if directory is None else directory
 #
 # ## Set deterministic training for reproducibility
 
-set_determinism(10)
+set_determinism(42)
 
 #
 # # Preprocessing of the BRATS Dataset in 2D slices for training
@@ -152,6 +236,9 @@ SSIM = SSIMMetric(spatial_dims=2)
 # PERC = PerceptualLoss(spatial_dims=2, device=device)
 # LPIPS = LearnedPerceptualImagePatchSimilarity(net_type='vgg', normalize=True).to(device)
 
+resume_training_flag = True  # Set to True to resume training, False to start from scratch
+checkpoint_path = "/home/simone.sarrocco/thesis/project/models/diffusion_model/GenerativeModels/tutorials/generative/image_to_image_translation/checkpoints/4th_run/ddpm_oct_model_601.pt"
+
 model = DiffusionModelUNet(
     spatial_dims=2,
     in_channels=2,
@@ -164,8 +251,8 @@ model = DiffusionModelUNet(
 )
 model.to(device)
 
-scheduler = DDPMScheduler(num_train_timesteps=1000, clip_sample_min=0, clip_sample_max=1)
-optimizer = torch.optim.Adam(params=model.parameters(), lr=2e-5)
+scheduler = DDPMScheduler(num_train_timesteps=1000)
+optimizer = torch.optim.Adam(params=model.parameters(), lr=2.5e-5)
 inferer = DiffusionInferer(scheduler)
 
 #
@@ -175,11 +262,11 @@ inferer = DiffusionInferer(scheduler)
 # This is described in Equation 7 of the paper https://arxiv.org/pdf/2112.03145.pdf.
 
 n_epochs = 2000
-# val_interval = 1
+val_interval = 1
 epoch_loss_list = []
 val_epoch_loss_list = []
-val_sample = 100
-save_interval = 100
+val_sample = 25
+save_interval = 50
 # +
 validation_samples_path = f'/home/simone.sarrocco/thesis/project/models/diffusion_model/GenerativeModels/tutorials/generative/image_to_image_translation/results/{run_number}/validation/output_samples'
 os.makedirs(validation_samples_path, exist_ok=True)
@@ -187,6 +274,26 @@ os.makedirs(validation_samples_path, exist_ok=True)
 scaler = GradScaler('cuda')
 total_start = time.time()
 i = 0
+
+# Resume from checkpoint if flag is set
+if resume_training_flag and os.path.exists(checkpoint_path):
+    model, optimizer, start_epoch = resume_training(model, optimizer, scheduler, checkpoint_path)
+
+    # Load the loss history if available (optional)
+    loss_history_path = os.path.join(os.path.dirname(checkpoint_path), "loss_history.npz")
+    if os.path.exists(loss_history_path):
+        history = np.load(loss_history_path)
+        epoch_loss_list = history["train_loss"].tolist()
+        if "val_loss" in history:
+            val_epoch_loss_list = history["val_loss"].tolist()
+        print(f"Loaded loss history with {len(epoch_loss_list)} entries")
+
+    # Calculate global step for tensorboard
+    i = start_epoch * len(train_loader)
+    print(f"Resuming training from epoch {start_epoch} (global step {i})")
+else:
+    print("Starting training from scratch")
+
 for epoch in range(n_epochs):
     model.train()
     epoch_loss = 0
@@ -218,26 +325,27 @@ for epoch in range(n_epochs):
         writer.add_scalar('Loss/train', loss.item(), i)
 
     epoch_loss_list.append(epoch_loss / (step + 1))
+
     """
     if (epoch+1) % val_interval == 0:
-        model.eval()
-        val_epoch_loss = 0
-        for step, (art10, pseudoart100) in enumerate(val_loader):
-            art10 = art10.to(device)
-            pseudoart100 = pseudoart100.to(device)
-            # seg = data_val["label"].to(device)  # this is the ground truth segmentation
-            timesteps = torch.randint(0, 1000, (art10.shape[0],)).to(device)
-            with torch.no_grad():
-                with autocast('cuda', enabled=True):
-                    noise = torch.randn_like(art10).to(device)
-                    noisy_pseudoart100 = scheduler.add_noise(original_samples=art10, noise=noise, timesteps=timesteps)
-                    combined = torch.cat((art10, noisy_pseudoart100), dim=1)
-                    prediction = model(x=combined, timesteps=timesteps)
-                    val_loss = F.mse_loss(prediction.float(), noise.float())
-            val_epoch_loss += val_loss.item()
-        print("Epoch", epoch, "Validation loss", val_epoch_loss / (step + 1))
-        writer.add_scalar("Loss/val", val_epoch_loss / (step+1), epoch+1)
-        val_epoch_loss_list.append(val_epoch_loss / (step + 1))
+    model.eval()
+    val_epoch_loss = 0
+    for step, (art10, pseudoart100) in enumerate(val_loader):
+        art10 = art10.to(device)
+        pseudoart100 = pseudoart100.to(device)
+        # seg = data_val["label"].to(device)  # this is the ground truth segmentation
+        timesteps = torch.randint(0, 1000, (art10.shape[0],)).to(device)
+        with torch.no_grad():
+            with autocast('cuda', enabled=True):
+                noise = torch.randn_like(art10).to(device)
+                noisy_pseudoart100 = scheduler.add_noise(original_samples=art10, noise=noise, timesteps=timesteps)
+                combined = torch.cat((art10, noisy_pseudoart100), dim=1)
+                prediction = model(x=combined, timesteps=timesteps)
+                val_loss = F.mse_loss(prediction.float(), noise.float())
+        val_epoch_loss += val_loss.item()
+    print("Epoch", epoch, "Validation loss", val_epoch_loss / (step + 1))
+    writer.add_scalar("Loss/val", val_epoch_loss / (step+1), epoch+1)
+    val_epoch_loss_list.append(val_epoch_loss / (step + 1))
     """
 
     if (epoch+1) % val_sample == 0:
@@ -318,14 +426,22 @@ for epoch in range(n_epochs):
         print(
             f"Validation metrics, epoch {epoch + 1}: PSNR: {avg_psnr.item():.5f} ± {std_psnr.item():.5f} | SSIM: {avg_ssim.item():.5f} ± {std_ssim.item():.5f} | MSE: {avg_mse.item():.5f} ± {std_mse.item():.5f}")
 
-    if epoch % save_interval == 0:
-        torch.save(model.state_dict(), f"{checkpoint_dir}/ddpm_oct_model_{epoch+1}.pt")
+    # Save checkpoint at regular intervals
+    if (epoch + 1) % save_interval == 0:
+        save_checkpoint(model, optimizer, scheduler, epoch, checkpoint_dir)
 
-torch.save(model.state_dict(), f"{checkpoint_dir}/ddpm_oct_model_last_epoch.pt")
+        # Optionally save loss history
+        np.savez(
+            f"{checkpoint_dir}/loss_history.npz",
+            train_loss=np.array(epoch_loss_list),
+            val_loss=np.array(val_epoch_loss_list) if val_epoch_loss_list else np.array([]),
+        )
+
+# torch.save(model.state_dict(), f"{checkpoint_dir}/ddpm_oct_model_last_epoch.pt")
+save_checkpoint(model, optimizer, scheduler, n_epochs - 1, checkpoint_dir, is_final=True)
 total_time = time.time() - total_start
 print(f"train diffusion completed, total time: {total_time}.")
-
-"""plt.style.use("seaborn-bright")
+plt.style.use("seaborn-bright")
 plt.title("Learning Curves Diffusion Model", fontsize=20)
 plt.plot(np.linspace(1, n_epochs, n_epochs), epoch_loss_list, color="C0", linewidth=2.0, label="Train")
 plt.plot(
@@ -341,7 +457,7 @@ plt.xlabel("Epochs", fontsize=16)
 plt.ylabel("Loss", fontsize=16)
 plt.legend(prop={"size": 14})
 plt.savefig('/home/simone.sarrocco/thesis/project/models/diffusion_model/GenerativeModels/tutorials/generative/image_to_image_translation/results/losses.png')
-plt.close()"""
+plt.close()
 # plt.show()
 # -
 
