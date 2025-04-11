@@ -122,6 +122,7 @@ def parse_args_and_config():
     parser.add_argument("--blur", type=bool, default=False, help="Add gaussian blur to the input images during pre-processing")
     parser.add_argument("--transform", type=bool, default=False, help="Apply data augmentation techniques")
     parser.add_argument("--batch_size", type=int, default=1, help="Batch size")
+    parser.add_argument("--weight_decay", type=float, default=0.0, help="Weight decay")
 
     args = parser.parse_args()
 
@@ -214,7 +215,7 @@ discriminator.to(device)
 perceptual_loss = PerceptualLoss(spatial_dims=2, network_type="alex", device='cuda')
 perceptual_loss.to(device)
 
-optimizer_g = torch.optim.Adam(params=model.parameters(), lr=1e-4)
+optimizer_g = torch.optim.Adam(params=model.parameters(), lr=1e-4, weight_decay=args.weight_decay)
 optimizer_d = torch.optim.Adam(params=discriminator.parameters(), lr=5e-4)
 
 # %%
@@ -480,12 +481,16 @@ with torch.no_grad():
                 writer.add_image(tag=f'Testing/Output', img_tensor=reconstruction[:n_example_images, 0, 8:-8, :],
                                  global_step=best_epoch)
 
+        reconstruction_image = reconstruction.cpu()
+        art10_image = art10.cpu()
+        pseudoart100_image = pseudoart100.cpu()
+
         for i in range(art10.shape[0]):
             # one grid for each image in each batch
             grid = create_grid(
-                reconstruction[i, :, 8:-8, :],
-                art10[i, :, 8:-8, :],
-                pseudoart100[i, :, 8:-8, :]
+                reconstruction_image[i, :, 8:-8, :],
+                art10_image[i, :, 8:-8, :],
+                pseudoart100_image[i, :, 8:-8, :]
             )
             grid_np = grid.permute(1, 2, 0).numpy()
             grid_np = (grid_np * 255).astype(np.uint8)
@@ -497,7 +502,7 @@ with torch.no_grad():
 
         # We compute and save the difference map between output and target (in the range [0,1])
         save_difference_maps_diffusion_paper(
-            art10, pseudoart100, reconstruction,
+            art10_image, pseudoart100_image, reconstruction_image,
             best_epoch, test_step + 1,
             histogram=True,
             writer=writer,
