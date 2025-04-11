@@ -116,6 +116,12 @@ def parse_args_and_config():
     parser.add_argument("--pixel_range", type=int, default=0, help="Pixel range of each image, 0 means [0,1], -1 means [-1,1]")
     # parser.add_argument("--iteration", type=int, default=0, help="Number of current epoch from which to sample")
     parser.add_argument("--model_name", type=str, default='', help="Name of the model configuration")
+    parser.add_argument("--resize", type=bool, default=False, help="Resize the images by half")
+    parser.add_argument("--clip", type=bool, default=False, help="Clip pixel intensities of input and target images by the 99.9 percentile")
+    parser.add_argument("--gaussian_noise", type=bool, default=False, help="Add gaussian noise to the input images during pre-processing")
+    parser.add_argument("--blur", type=bool, default=False, help="Add gaussian blur to the input images during pre-processing")
+    parser.add_argument("--transform", type=bool, default=False, help="Apply data augmentation techniques")
+    parser.add_argument("--batch_size", type=int, default=1, help="Batch size")
 
     args = parser.parse_args()
 
@@ -167,6 +173,7 @@ test = np.load('/home/simone.sarrocco/thesis/project/data/test_set_patient_split
 train_dataset = OCTDataset(train, resize=args.resize, pixel_range=args.pixel_range, clip=args.clip,
                            gaussian_noise=args.gaussian_noise, blur=args.blur, transform=args.transform)
 train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True)
+
 val_dataset = OCTDataset(val, resize=args.resize, pixel_range=args.pixel_range, clip=args.clip,
                          gaussian_noise=args.gaussian_noise, blur=args.blur, transform=False)
 val_loader = DataLoader(val_dataset, batch_size=args.batch_size, shuffle=False)
@@ -239,7 +246,7 @@ i = 0
 best_val_loss = float("inf")
 PSNR = PeakSignalNoiseRatio().to(device)
 # SSIM = StructuralSimilarityIndexMeasure().to(device)
-SSIM = SSIMMetric(spatial_dims=2, reduction='mean_batch')
+SSIM = SSIMMetric(spatial_dims=2)
 # LPIPS = LearnedPerceptualImagePatchSimilarity(net_type='vgg', normalize=True).to(device)
 
 for epoch in range(n_epochs):
@@ -328,7 +335,7 @@ for epoch in range(n_epochs):
                                      img_tensor=art10[:n_example_images, 0, 8:-8, :],
                                      global_step=i)
                     writer.add_image(tag=f'Training/Target',
-                                     img_tensor=(pseudoart100[:n_example_images, 0, 8:-8, :] + 1) / 2,
+                                     img_tensor=pseudoart100[:n_example_images, 0, 8:-8, :],
                                      global_step=i)
                     writer.add_image(tag=f'Training/Output', img_tensor=reconstruction[:n_example_images, 0, 8:-8, :],
                                      global_step=i)
@@ -423,12 +430,7 @@ for epoch in range(n_epochs):
 
 total_time = time.time() - total_start
 print(f"train completed, total time: {total_time}.")
-# %% [markdown]
-# ### Cleanup data directory
-#
-# Remove directory if a temporary was used.
 
-# %%
 if directory is None:
     shutil.rmtree(root_dir)
 
@@ -440,7 +442,7 @@ model.eval()
 
 PSNR = PeakSignalNoiseRatio().to(device)
 # SSIM = StructuralSimilarityIndexMeasure().to(device)
-SSIM = SSIMMetric(spatial_dims=2, reduction='mean_batch')
+SSIM = SSIMMetric(spatial_dims=2)
 # LPIPS = LearnedPerceptualImagePatchSimilarity(net_type='vgg', normalize=True).to(device)
 n_example_images = 1
 best_epoch = checkpoint["epoch"]
