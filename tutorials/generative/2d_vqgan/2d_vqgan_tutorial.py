@@ -123,6 +123,7 @@ def parse_args_and_config():
     parser.add_argument("--transform", type=bool, default=False, help="Apply data augmentation techniques")
     parser.add_argument("--batch_size", type=int, default=1, help="Batch size")
     parser.add_argument("--weight_decay", type=float, default=0.0, help="Weight decay")
+    parser.add_argument("--dropout", type=float, default=0.0, help="Dropout")
 
     args = parser.parse_args()
 
@@ -206,6 +207,7 @@ model = VQVAE(
     upsample_parameters=((2, 4, 1, 1, 0), (2, 4, 1, 1, 0)),
     num_embeddings=args.num_embeddings,  # this is "k"
     embedding_dim=args.embedding_dimension,  # this is "d"
+    dropout=args.dropout,
 )
 model.to(device)
 
@@ -215,7 +217,7 @@ discriminator.to(device)
 perceptual_loss = PerceptualLoss(spatial_dims=2, network_type="alex", device='cuda')
 perceptual_loss.to(device)
 
-optimizer_g = torch.optim.Adam(params=model.parameters(), lr=1e-4, weight_decay=args.weight_decay)
+optimizer_g = torch.optim.Adam(params=model.parameters(), lr=2e-5, weight_decay=args.weight_decay)
 optimizer_d = torch.optim.Adam(params=discriminator.parameters(), lr=5e-4)
 
 # %%
@@ -247,7 +249,7 @@ i = 0
 best_val_loss = float("inf")
 PSNR = PeakSignalNoiseRatio().to(device)
 # SSIM = StructuralSimilarityIndexMeasure().to(device)
-SSIM = SSIMMetric(spatial_dims=2)
+SSIM = SSIMMetric(spatial_dims=2, reduction='mean_batch')
 # LPIPS = LearnedPerceptualImagePatchSimilarity(net_type='vgg', normalize=True).to(device)
 
 for epoch in range(n_epochs):
@@ -319,16 +321,16 @@ for epoch in range(n_epochs):
             writer.add_scalar('Loss/discriminator_loss', loss_d, i)
 
             # Every epoch visualize input image and corresponding reconstruction on tensorboard
-            if i % 1980 == 0:
+            if i % 990 == 0:
                 if args.pixel_range == -1:
                     writer.add_image(tag=f'Training/Input',
                                      # img_tensor=images[:n_example_images, 0, 8:-8, :],
-                                     img_tensor=(art10[:n_example_images, 0, 8:-8, :]+1)/2,
+                                     img_tensor=(art10[:n_example_images, 0, 8:-8, :] + 1) / 2,
                                      global_step=i)
                     writer.add_image(tag=f'Training/Target',
                                      img_tensor=(pseudoart100[:n_example_images, 0, 8:-8, :] + 1) / 2,
                                      global_step=i)
-                    writer.add_image(tag=f'Training/Output', img_tensor=(reconstruction[:n_example_images, 0, 8:-8, :]+1)/2,
+                    writer.add_image(tag=f'Training/Output', img_tensor=(reconstruction[:n_example_images, 0, 8:-8, :] + 1) / 2,
                                      global_step=i)
                 elif args.pixel_range == 0:
                     writer.add_image(tag=f'Training/Input',
@@ -363,9 +365,9 @@ for epoch in range(n_epochs):
                 if args.pixel_range == -1:
                     intermediary_images.append((reconstruction[:n_example_images, 0]+1)/2)
                     # writer.add_image(tag=f'Validation/Input', img_tensor=images[:n_example_images, 0], global_step=i)
-                    writer.add_image(tag=f'Validation/Input', img_tensor=(art10[:n_example_images, 0, 8:-8, :]+1)/2, global_step=i)
-                    writer.add_image(tag=f'Validation/Target', img_tensor=(pseudoart100[:n_example_images, 0, 8:-8, :]+1)/2, global_step=i)
-                    writer.add_image(tag=f'Validation/Output', img_tensor=(reconstruction[:n_example_images, 0, 8:-8, :]+1)/2,
+                    writer.add_image(tag=f'Validation/Input', img_tensor=(art10[:n_example_images, 0, 8:-8, :] + 1) / 2, global_step=i)
+                    writer.add_image(tag=f'Validation/Target', img_tensor=(pseudoart100[:n_example_images, 0, 8:-8, :] + 1) / 2, global_step=i)
+                    writer.add_image(tag=f'Validation/Output', img_tensor=(reconstruction[:n_example_images, 0, 8:-8, :] + 1) / 2,
                                      global_step=i)
                 elif args.pixel_range == 0:
                     intermediary_images.append(reconstruction[:n_example_images, 0])
@@ -443,7 +445,7 @@ model.eval()
 
 PSNR = PeakSignalNoiseRatio().to(device)
 # SSIM = StructuralSimilarityIndexMeasure().to(device)
-SSIM = SSIMMetric(spatial_dims=2)
+SSIM = SSIMMetric(spatial_dims=2, reduction='mean_batch')
 # LPIPS = LearnedPerceptualImagePatchSimilarity(net_type='vgg', normalize=True).to(device)
 n_example_images = 1
 best_epoch = checkpoint["epoch"]
@@ -495,7 +497,11 @@ with torch.no_grad():
             grid_np = grid.permute(1, 2, 0).numpy()
             grid_np = (grid_np * 255).astype(np.uint8)
             final_grid = Image.fromarray(grid_np)
-            final_grid.save(f'{outputs_dir}/Grids_Input_Target_Output/Sample_{test_step+1}_{i + 1}.png')
+
+            grids_folder_path = os.path.join(outputs_dir, 'Grids_Input_Target_Output')
+            os.makedirs(grids_folder_path, exist_ok=True)
+
+            final_grid.save(f'{grids_folder_path}/Sample_{test_step+1}_{i + 1}.png')
             # cv2.imwrite(filename=f'{path}/Grids_Input_Target_Output/Sample_{batch_idx + 1}_{i + 1}.png', img=grid)
             # self.writer.add_image(f'{phase}/Sample_{batch_idx + 1}_{i + 1}', grid,
             #                      self.step + self.resume_step)

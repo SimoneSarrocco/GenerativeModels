@@ -95,7 +95,7 @@ class OCTDataset(Dataset):
         if self.transform:
             trans = transforms.Compose([
                 transforms.RandomHorizontalFlip(p=0.5),
-                # transforms.RandomRotation(degrees=5),
+                transforms.RandomRotation(degrees=5),
                 # transforms.ColorJitter(0.2, 0.2),
             ])
             concatenation = torch.stack((low_snr, high_snr), dim=0)
