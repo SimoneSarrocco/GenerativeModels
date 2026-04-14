@@ -25,7 +25,17 @@ from PIL import Image
 import cv2
 import argparse
 from torchvision.utils import make_grid
+import math
+import pandas as pd
 print_config()
+
+
+def psnr(output: torch.Tensor, target: torch.Tensor) -> float:
+    assert target.shape == output.shape
+    mse = mean_flat((target - output) ** 2)
+    target_image = np.asarray(target.cpu(), dtype=np.float32)
+    psnr = 20 * math.log(np.max(target_image), 10) - 10 * math.log(mse, 10)
+    return psnr
 
 
 class EarlyStopper:
@@ -200,8 +210,8 @@ model = VQVAE(
     spatial_dims=2,
     in_channels=1,
     out_channels=1,
-    num_channels=(256, 512),
-    num_res_channels=512,
+    num_channels=(512, 1024),
+    num_res_channels=1024,
     num_res_layers=2,
     downsample_parameters=((2, 4, 1, 1), (2, 4, 1, 1)),
     upsample_parameters=((2, 4, 1, 1, 0), (2, 4, 1, 1, 0)),
@@ -214,11 +224,11 @@ model.to(device)
 discriminator = PatchDiscriminator(spatial_dims=2, in_channels=2, num_layers_d=3, num_channels=64)
 discriminator.to(device)
 
-perceptual_loss = PerceptualLoss(spatial_dims=2, network_type="alex", device='cuda')
+perceptual_loss = PerceptualLoss(spatial_dims=2, network_type="resnet50", pretrained_path="/home/simone.sarrocco/thesis/project/models/lpips_training/checkpoints/my_resnet_7.pth", pretrained_state_dict_key=None, device='cuda')
 perceptual_loss.to(device)
 
-optimizer_g = torch.optim.Adam(params=model.parameters(), lr=2e-5, weight_decay=args.weight_decay)
-optimizer_d = torch.optim.Adam(params=discriminator.parameters(), lr=5e-4)
+optimizer_g = torch.optim.Adam(params=model.parameters(), lr=1e-4, weight_decay=args.weight_decay)
+optimizer_d = torch.optim.Adam(params=discriminator.parameters(), lr=5e-4, weight_decay=args.weight_decay)
 
 # %%
 l1_loss = L1Loss()
@@ -247,11 +257,14 @@ early_stopper = EarlyStopper(patience=20, min_delta=0.0001)
 total_start = time.time()
 i = 0
 best_val_loss = float("inf")
-PSNR = PeakSignalNoiseRatio().to(device)
+PSNR = PeakSignalNoiseRatio(data_range=1.).to(device)
 # SSIM = StructuralSimilarityIndexMeasure().to(device)
-SSIM = SSIMMetric(spatial_dims=2, reduction='mean_batch')
+SSIM = SSIMMetric(spatial_dims=2, data_range=1.)
+LPIPS = PerceptualLoss(spatial_dims=2, network_type='resnet50', pretrained=True, pretrained_path='/home/simone.sarrocco/thesis/project/models/lpips_training/checkpoints/my_resnet_7.pth', device=device)
+LPIPS_RAD = PerceptualLoss(spatial_dims=2, network_type='radimagenet_resnet50', device=device)
+LPIPS_RESNET = PerceptualLoss(spatial_dims=2, network_type='resnet50', device=device)
 # LPIPS = LearnedPerceptualImagePatchSimilarity(net_type='vgg', normalize=True).to(device)
-
+"""
 for epoch in range(n_epochs):
     model.train()
     discriminator.train()
@@ -436,26 +449,34 @@ print(f"train completed, total time: {total_time}.")
 
 if directory is None:
     shutil.rmtree(root_dir)
+"""
 
 # Load checkpoint
-ckpt_path = f"/home/simone.sarrocco/thesis/project/models/diffusion_model/GenerativeModels/tutorials/generative/2d_vqgan/{args.model_name}/checkpoints/vqgan_best_checkpoint.ckpt"
+# ckpt_path = f"/home/simone.sarrocco/thesis/project/models/diffusion_model/GenerativeModels/tutorials/generative/2d_vqgan/{args.model_name}/checkpoints/vqgan_best_checkpoint.ckpt"
+ckpt_path = f"/home/simone.sarrocco/thesis/project/models/diffusion_model/GenerativeModels/tutorials/generative/image_to_image_translation/checkpoints/7th_run"
 checkpoint = torch.load(ckpt_path, map_location=device)
 model.load_state_dict(checkpoint["state_dict"])
 model.eval()
 
-PSNR = PeakSignalNoiseRatio().to(device)
+# PSNR = PeakSignalNoiseRatio(data_range=1.).to(device)
 # SSIM = StructuralSimilarityIndexMeasure().to(device)
-SSIM = SSIMMetric(spatial_dims=2, reduction='mean_batch')
+# SSIM = SSIMMetric(spatial_dims=2, data_range=1.)
 # LPIPS = LearnedPerceptualImagePatchSimilarity(net_type='vgg', normalize=True).to(device)
-n_example_images = 1
+# n_example_images = 1
 best_epoch = checkpoint["epoch"]
 
+# outputs_dir = f"/home/simone.sarrocco/thesis/project/models/diffusion_model/GenerativeModels/tutorials/generative/2d_vqgan/{args.model_name}/testing"
 outputs_dir = f"/home/simone.sarrocco/thesis/project/models/diffusion_model/GenerativeModels/tutorials/generative/2d_vqgan/{args.model_name}/testing"
 os.makedirs(outputs_dir, exist_ok=True)
 
+output_image_dir = os.path.join(outputs_dir, 'outputs')
+os.makedirs(output_image_dir, exist_ok=True)
+
+metrics_per_image = []
+
 # Testing loop
 with torch.no_grad():
-    mse_batches, psnr_batches, ssim_batches = [], [], []
+    mse_batches, psnr_batches, ssim_batches, my_psnr_batches, lpips_batches, lpips_rad_batches, pseudo_lpips_batches = [], [], [], [], [], [], []
     for test_step, (input_image, target_image) in enumerate(test_loader):
         art10 = input_image.to(device)
         pseudoart100 = target_image.to(device)
@@ -464,6 +485,7 @@ with torch.no_grad():
 
         # get the first sample from the first validation batch for visualization
         # purposes
+        """
         if test_step == 1:
             if args.pixel_range == -1:
                 # writer.add_image(tag=f'Validation/Input', img_tensor=images[:n_example_images, 0], global_step=i)
@@ -482,11 +504,21 @@ with torch.no_grad():
                                  global_step=best_epoch)
                 writer.add_image(tag=f'Testing/Output', img_tensor=reconstruction[:n_example_images, 0, 8:-8, :],
                                  global_step=best_epoch)
-
+        """
         reconstruction_image = reconstruction.cpu()
         art10_image = art10.cpu()
         pseudoart100_image = pseudoart100.cpu()
 
+        # Save the output images in the output_image_dir folder
+        # cv2.imwrite(f'{output_image_dir}/output_{test_step+1}.png', np.asarray(reconstruction_image[0, 0, 8:-8, :], dtype=np.float32)*255)
+
+        reconstruction_image_numpy = reconstruction_image[0, 0, 8:-8, :].numpy()
+        # Save model outputs as .tiff images
+
+        output_array = (reconstruction_image_numpy * 255).clip(0, 255).astype(np.uint8)
+        Image.fromarray(output_array, mode="L").save(
+            f'/home/simone.sarrocco/thesis/project/visual_turing_test/images/VQGAN/output_{test_step + 1}.png')
+        """
         for i in range(art10.shape[0]):
             # one grid for each image in each batch
             grid = create_grid(
@@ -505,7 +537,7 @@ with torch.no_grad():
             # cv2.imwrite(filename=f'{path}/Grids_Input_Target_Output/Sample_{batch_idx + 1}_{i + 1}.png', img=grid)
             # self.writer.add_image(f'{phase}/Sample_{batch_idx + 1}_{i + 1}', grid,
             #                      self.step + self.resume_step)
-
+        
         # We compute and save the difference map between output and target (in the range [0,1])
         save_difference_maps_diffusion_paper(
             art10_image, pseudoart100_image, reconstruction_image,
@@ -515,38 +547,73 @@ with torch.no_grad():
             phase='Testing',
             folder=outputs_dir,
         )
-
+        """
         # Compute PSNR, SSIM, and MSE between input and reconstructed image
         mse_batch = mean_flat((reconstruction[:, :, 8:-8, :] - pseudoart100[:, :, 8:-8, :]) ** 2)
         psnr_batch = PSNR(reconstruction[:, :, 8:-8, :], pseudoart100[:, :, 8:-8, :])
-        ssim_batch = SSIM._compute_metric(reconstruction[:, :, 8:-8, :], pseudoart100[:, :, 8:-8, :])
+        my_psnr_batch = psnr(reconstruction[:, :, 8:-8, :], pseudoart100[:, :, 8:-8, :])
+        ssim_batch = SSIM(reconstruction[:, :, 8:-8, :], pseudoart100[:, :, 8:-8, :])
+        lpips_batch = LPIPS(reconstruction[:, :, 8:-8, :], pseudoart100[:, :, 8:-8, :])
+        lpips_rad_batch = LPIPS_RAD(reconstruction[:, :, 8:-8, :], pseudoart100[:, :, 8:-8, :])
+        pseudo_lpips_batch = LPIPS_RESNET(reconstruction[:, :, 8:-8, :], pseudoart100[:, :, 8:-8, :])
         # perceptual_batch = perceptual_loss(reconstruction[:, :, 8:-8, :].float(), images[:, :, 8:-8, :].float())
+
+        metrics_per_image.append({
+            "image_index": test_step+1,
+            "mse": mse_batch.item(),
+            "psnr": psnr_batch.item(),
+            "ssim": ssim_batch[0][0].item(),
+            "lpips_oct": lpips_batch.item(),
+            "lpips_rad": lpips_rad_batch.item(),
+            "lpips_resnet": pseudo_lpips_batch.item(),
+            # Add other scores as needed
+        })
 
         mse_batches.append(mse_batch.mean().cpu())
         psnr_batches.append(psnr_batch.cpu())
+        my_psnr_batches.append(psnr_batch.cpu())
         ssim_batches.append(ssim_batch.cpu())
+        lpips_batches.append(lpips_batch.cpu())
+        lpips_rad_batches.append(lpips_rad_batch.cpu())
+        pseudo_lpips_batches.append(pseudo_lpips_batch.cpu())
         # perceptual_batches.append(perceptual_batch.cpu())
+        print(f"Testing metrics, batch {test_step+1}: PSNR: {psnr_batch.item():.4f}| SSIM: {ssim_batch.item():.4f} | MSE: {mse_batch.item():.4f} | LPIPS_OCT: {lpips_batch.item():.4f} | LPIPS_RAD: {lpips_rad_batch.item():.4f} | LPIPS_RESNET: {pseudo_lpips_batch.item():.4f}")
 
     psnr_batches = np.asarray(psnr_batches, dtype=np.float32)
+    my_psnr_batches = np.asarray(my_psnr_batches, dtype=np.float32)
     ssim_batches = np.asarray(ssim_batches, dtype=np.float32)
     mse_batches = np.asarray(mse_batches, dtype=np.float32)
+    lpips_batches = np.asarray(lpips_batches, dtype=np.float32)
+    lpips_rad_batches = np.asarray(lpips_rad_batches, dtype=np.float32)
+    pseudo_batches = np.asarray(pseudo_lpips_batches, dtype=np.float32)
     # perceptual_batches = np.asarray(perceptual_batches, dtype=np.float32)
 
     # Calculate averages
     avg_psnr, std_psnr = np.mean(psnr_batches), np.std(psnr_batches)
+    avg_my_psnr, std_my_psnr = np.mean(my_psnr_batches), np.std(my_psnr_batches)
     avg_ssim, std_ssim = np.mean(ssim_batches), np.std(ssim_batches)
     avg_mse, std_mse = np.mean(mse_batches), np.std(mse_batches)
+    avg_lpips, std_lpips = np.mean(lpips_batches), np.std(lpips_batches)
+    avg_lpips_rad, std_lpips_rad = np.mean(lpips_rad_batches), np.std(lpips_rad_batches)
+    avg_pseudo_lpips, std_pseudo_lpips = np.mean(pseudo_lpips_batches), np.std(pseudo_lpips_batches)
     # avg_perceptual, std_perceptual = np.mean(perceptual_batches), np.std(perceptual_batches)
+
+    df_metrics = pd.DataFrame(metrics_per_image)
+    df_metrics.to_csv(f"{outputs_dir}/vqgan_test_metrics.csv", index=False)
+    print(f"Saved individual test scores to {outputs_dir}/vqgan_test_metrics.csv")
 
     # Log average metrics to TensorBoard
     metrics_summary = {
         "PSNR": avg_psnr,
         "SSIM": avg_ssim,
         "MSE": avg_mse,
+        "LPIPS_OCT": avg_lpips,
+        "LPIPS_RAD": avg_lpips_rad,
+        "LPIPS_RESNET": avg_pseudo_lpips,
         # "PERC_LOSS": avg_perceptual,
     }
 
     for metric_name, value in metrics_summary.items():
         writer.add_scalar(f"Testing_metrics/{metric_name}", value.item(), best_epoch)
     print(
-        f"Testing metrics, epoch {best_epoch}: PSNR: {avg_psnr.item():.5f} ± {std_psnr.item():.5f} | SSIM: {avg_ssim.item():.5f} ± {std_ssim.item():.5f} | MSE: {avg_mse.item():.5f} ± {std_mse.item():.5f}")
+        f"Testing metrics, epoch {best_epoch}: PSNR: {avg_psnr.item():.4f} ± {std_psnr.item():.4f} | SSIM: {avg_ssim.item():.4f} ± {std_ssim.item():.4f} | MSE: {avg_mse.item():.4f} ± {std_mse.item():.4f} | LPIPS_OCT: {avg_lpips.item():.4f} ± {std_lpips.item():.4f} | LPIPS_RAD: {avg_lpips_rad.item():.4f} ± {std_lpips_rad.item():.4f} | LPIPS_RESNET: {avg_pseudo_lpips.item():.4f} ± {std_pseudo_lpips.item():.4f}")

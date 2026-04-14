@@ -16,7 +16,8 @@ import torch.nn as nn
 from lpips import LPIPS
 from torchvision.models import ResNet50_Weights, resnet50
 from torchvision.models.feature_extraction import create_feature_extractor
-
+import math
+import pdb
 
 class PerceptualLoss(nn.Module):
     """
@@ -60,6 +61,7 @@ class PerceptualLoss(nn.Module):
         pretrained_path: str | None = None,
         pretrained_state_dict_key: str | None = None,
         device: torch.device = torch.device("cpu"),  # Allow specifying the device
+        pseudo_LPIPS: bool = False,
     ):
         super().__init__()
 
@@ -74,7 +76,7 @@ class PerceptualLoss(nn.Module):
 
         if cache_dir:
             torch.hub.set_dir(cache_dir)
-
+        self.pseudo_LPIPS = pseudo_LPIPS
         self.device = device  # Store the device for later usage
         self.spatial_dims = spatial_dims
         if spatial_dims == 3 and is_fake_3d is False:
@@ -154,6 +156,10 @@ class PerceptualLoss(nn.Module):
         else:
             # 2D and real 3D cases
             loss = self.perceptual_function(input, target)
+            if self.pseudo_LPIPS:
+                c = 0.00008
+                loss = math.sqrt(loss + c**2) - c
+                loss = torch.tensor(loss, dtype=torch.float32)
 
         return torch.mean(loss)
 
@@ -319,6 +325,7 @@ class TorchvisionModelPerceptualSimilarity(nn.Module):
         self.final_layer = "layer4.2.relu_2"
         self.model = create_feature_extractor(network, [self.final_layer])
         self.eval()
+        # pdb.set_trace()
 
         for param in self.parameters():
             param.requires_grad = False
@@ -337,8 +344,9 @@ class TorchvisionModelPerceptualSimilarity(nn.Module):
             target = target.repeat(1, 3, 1, 1)
 
         # Input normalization
-        input = torchvision_zscore_norm(input)
-        target = torchvision_zscore_norm(target)
+        # input = torchvision_zscore_norm(input)
+        # target = torchvision_zscore_norm(target)
+        
 
         # Get model outputs
         outs_input = self.model.forward(input)[self.final_layer]
@@ -350,7 +358,7 @@ class TorchvisionModelPerceptualSimilarity(nn.Module):
 
         results = (feats_input - feats_target) ** 2
         results = spatial_average(results.sum(dim=1, keepdim=True), keepdim=True)
-
+        # pdb.set_trace()
         return results
 
 
